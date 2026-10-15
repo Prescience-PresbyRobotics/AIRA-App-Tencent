@@ -1,6 +1,10 @@
 # AIRA backend — controlled prototype
 
-Implemented 14 October; deployed to the confirmed AIRA-App-Tencent Supabase project on 15 October 2026. Project `yzcnccjlwgrkxokgjtkv` has migration `202610140001`, 16 RLS-protected app tables, `aira-api`, `aira-worker`, private worker/signing secrets and a minute-based Cron job. Hosted authentication rejection, localhost CORS and authenticated worker execution were verified. **Live provider calls, end-to-end user login, Google OAuth and external email sender setup remain unverified.** There is no external caregiver delivery adapter.
+Implemented 14 October; deployed to the confirmed AIRA-App-Tencent Supabase project on 15 October 2026. Project `yzcnccjlwgrkxokgjtkv` has migration `202610140001`, 16 RLS-protected app tables, `aira-api`, `aira-worker`, private worker/signing secrets and a minute-based Cron job. The connected frontend is deployed to Firebase project `aira-app-tencent` at [aira-app-tencent.web.app](https://aira-app-tencent.web.app).
+
+Hosted authorization rejection, local/Firebase CORS, authenticated worker execution, password authentication through the hosted Auth API and live OpenAI/ElevenLabs calls were verified. The preconfirmed synthetic test account and app profile were deleted and their absence verified. **Custom SMTP, registration/confirmation/recovery email delivery and Google OAuth remain incomplete.** The Google Cloud console failed to load during OAuth setup. Browser/device flows remain to be tested. There is no external caregiver delivery adapter.
+
+The confirmed environment uses `OPENAI_MODEL=gpt-4.1-mini`, ElevenLabs voice `La9lzDJ3mmfNhhQA06WM`, STT model `scribe_v2` and TTS model `eleven_multilingual_v2`. Provider keys stay in Edge Function secrets. Supabase Auth Site URL is `https://aira-app-tencent.web.app`; redirect URLs allow localhost port 8080 and this project's `web.app`/`firebaseapp.com` domains. CORS allows their exact origins. Email confirmation remains enabled and new passwords require 10 characters.
 
 The backend accepts Supabase's injected modern `SUPABASE_SECRET_KEYS` dictionary (default key), older `SUPABASE_SECRET_KEY`, or legacy `SUPABASE_SERVICE_ROLE_KEY`. Optional `AIRA_SUPABASE_SECRET_KEY_NAME` selects a named dictionary key. Modern secret keys are sent in `apikey`, while Auth verification retains the user's Bearer token.
 
@@ -29,7 +33,9 @@ The backend accepts Supabase's injected modern `SUPABASE_SECRET_KEYS` dictionary
   self-reported feelings, and the same descriptive insights response for
   permitted owners/caregivers/admins.
 
-## Set up your projects
+## Set up another environment
+
+The confirmed project above is already provisioned. Use these steps for another test environment; do not overwrite its existing secrets with blank example values.
 
 1. Create a Supabase project for **development/testing**, choose a region
    deliberately, and record its project reference and URL. Keep its database
@@ -38,7 +44,8 @@ The backend accepts Supabase's injected modern `SUPABASE_SECRET_KEYS` dictionary
    Configure your own SMTP sender before public registration. Keep anonymous
    sign-in disabled for this implementation.
 3. Create a Google OAuth web client in Google Cloud. Configure its consent
-   screen, permitted audience and test accounts. Use the exact Supabase callback
+   screen and permitted audience, using only basic identity scopes (`openid`,
+   `email`, `profile`). Use the exact Supabase callback
    shown in Auth → Google (normally
    `https://PROJECT_REF.supabase.co/auth/v1/callback`) as the Google authorized
    redirect. Put the Google client ID/secret in Supabase's provider settings,
@@ -80,8 +87,9 @@ supabase functions serve --env-file supabase/.env
 
 `db reset` resets the local development database; do not aim it at production.
 Local email confirmations can be inspected through Supabase's local mail UI.
-`config.toml` uses `http://localhost:8080`; run Flutter on that origin or update
-both the allowed origins and Auth redirects.
+`config.toml` allows `http://localhost:8080` redirects; run Flutter on that origin
+or update both the allowed origins and Auth redirects. Its fallback Site URL
+is the hosted app; use a local Site URL when testing a separate local-only stack.
 
 After creating your **test** cloud project, apply the reviewed migration and
 functions:
@@ -259,9 +267,35 @@ output-gate tests prove unsafe/malformed checker output does not escape the
 route. These tests do not establish hosted Supabase Auth behavior, real provider
 quality, medical accuracy or device accessibility.
 
+### Live integration smoke test
+
+The 15 October 2026 synthetic run passed CORS, unauthenticated rejection, password sign-in through the hosted Auth API, profile/default-consent checks, staff-access denial, a screened approved OpenAI response, ElevenLabs MP3 synthesis and transcription of that synthetic audio. Cleanup removed the temporary Auth account and app profile and verified their absence.
+
+Use Python 3 and an authenticated Supabase CLI with permission to read project API keys and administer test users. From the repository root:
+
+```sh
+# Plan only: no network, keys or accounts accessed.
+python3 scripts/smoke_live.py --project-ref yzcnccjlwgrkxokgjtkv \
+  --origin https://aira-app-tencent.web.app
+
+# Explicitly run against live services.
+python3 scripts/smoke_live.py --project-ref yzcnccjlwgrkxokgjtkv \
+  --origin https://aira-app-tencent.web.app --run
+```
+
+Pass `--supabase /path/to/supabase` if the CLI is outside PATH. The script verifies the linked project and keeps Supabase credentials in memory; it never reads OpenAI/ElevenLabs keys. One run normally consumes three OpenAI requests plus one ElevenLabs synthesis and one transcription, with normal provider charges. It uses a random reserved `.invalid` email, explicitly confirms only that synthetic account through Auth Admin, sends no email, leaves global email-confirmation settings unchanged, and keeps all optional app consents off. No caregiver is contacted.
+
+Account cleanup runs on success, failures and normal interruption. An ignored `supabase/.temp/live-smoke-RUN_ID.json` journal contains only the project/run ID and timestamp for recovery after a process or machine crash. To retry cleanup, use the run ID printed by the script:
+
+```sh
+python3 scripts/smoke_live.py --project-ref yzcnccjlwgrkxokgjtkv --cleanup-run RUN_ID
+```
+
+Cleanup verifies the account's synthetic marker before deleting it. Keys, session tokens, generated text and audio are never printed or saved. The test verifies backend connectivity and response handling; it does not verify SMTP delivery, registration confirmation links, password-recovery email, Google OAuth, physical camera/microphone/speaker behavior, model accuracy or clinical outcomes.
+
 ## Known limits and next work
 
-- Supabase provisioning is complete for the confirmed project. Email/Google callbacks, provider credentials, Firebase HTTPS deployment and end-to-end device testing remain to do. No live provider calls have been verified.
+- Supabase provisioning, provider credentials and Firebase HTTPS deployment are complete for the confirmed project. A synthetic backend test verified hosted password authentication and live OpenAI/ElevenLabs calls. Custom SMTP, confirmation/recovery email delivery, Google OAuth and hosted browser/device end-to-end tests remain to do.
 - The safety classifier/rules are a conservative **unvalidated prototype**, not
   a clinical instrument. English urgency matching can miss wording; exact
   urgency evaluation, latency targets, reviewer staffing and local help

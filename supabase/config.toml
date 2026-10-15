@@ -18,8 +18,8 @@ port = 54323
 
 [auth]
 enabled = true
-site_url = "http://localhost:8080"
-additional_redirect_urls = ["http://localhost:8080/**"]
+site_url = "https://aira-app-tencent.web.app"
+additional_redirect_urls = ["http://localhost:8080/**", "https://aira-app-tencent.web.app/**", "https://aira-app-tencent.firebaseapp.com/**"]
 jwt_expiry = 3600
 enable_signup = true
 enable_anonymous_sign_ins = false
