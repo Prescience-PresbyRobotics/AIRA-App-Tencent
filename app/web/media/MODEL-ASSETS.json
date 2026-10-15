@@ -1,0 +1,55 @@
+{
+  "source": "https://github.com/justadudewhohacks/face-api.js",
+  "version": "0.22.2",
+  "commit": "8609b25a15f417398a4d2b95dc91985cd1e0c0c3",
+  "files": [
+    {
+      "path": "vendor/face-api-0.22.2.min.js",
+      "bytes": 663829,
+      "sha256": "5d66ec95338d7fcc365ce15481b8599baf4b6e22c9a624b76d4ca821a669a659",
+      "source": "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/8609b25a15f417398a4d2b95dc91985cd1e0c0c3/dist/face-api.min.js"
+    },
+    {
+      "path": "vendor/face-api-LICENSE.txt",
+      "bytes": 1072,
+      "sha256": "d5480b4d4e46880107a56db666697ec3e90def81a8fc829e530b1c291e3172a5",
+      "source": "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/8609b25a15f417398a4d2b95dc91985cd1e0c0c3/LICENSE"
+    },
+    {
+      "path": "models/tiny_face_detector_model-weights_manifest.json",
+      "bytes": 2953,
+      "sha256": "14c60659a31b6b7b1320077171b8f8adcb24ef0e62dde62ce603bcb49a1b49b5",
+      "source": "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/8609b25a15f417398a4d2b95dc91985cd1e0c0c3/weights/tiny_face_detector_model-weights_manifest.json"
+    },
+    {
+      "path": "models/tiny_face_detector_model-shard1",
+      "bytes": 193321,
+      "sha256": "b7503ce7df31039b1c43316a9b865cab6a70dd748cc602d3fa28b551503c3871",
+      "source": "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/8609b25a15f417398a4d2b95dc91985cd1e0c0c3/weights/tiny_face_detector_model-shard1"
+    },
+    {
+      "path": "models/face_landmark_68_tiny_model-weights_manifest.json",
+      "bytes": 4441,
+      "sha256": "3c63b8984302c187b218d9ef5aa149ed8c2c7fa3fe54db078614692bc48d153c",
+      "source": "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/8609b25a15f417398a4d2b95dc91985cd1e0c0c3/weights/face_landmark_68_tiny_model-weights_manifest.json"
+    },
+    {
+      "path": "models/face_landmark_68_tiny_model-shard1",
+      "bytes": 77224,
+      "sha256": "b98e9f2f7da76f8a6dda9741a36ed485b224b889d552de2b2c1bb16217f67bfc",
+      "source": "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/8609b25a15f417398a4d2b95dc91985cd1e0c0c3/weights/face_landmark_68_tiny_model-shard1"
+    },
+    {
+      "path": "models/face_expression_model-weights_manifest.json",
+      "bytes": 6384,
+      "sha256": "960cbe959fe0328965dd18662d839f197df6e27607da4f726cd0c826e47fc936",
+      "source": "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/8609b25a15f417398a4d2b95dc91985cd1e0c0c3/weights/face_expression_model-weights_manifest.json"
+    },
+    {
+      "path": "models/face_expression_model-shard1",
+      "bytes": 329468,
+      "sha256": "9a9840f2cf1f4c7eab95f197512569345c00d2426754d4608b92af30e0300f3d",
+      "source": "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/8609b25a15f417398a4d2b95dc91985cd1e0c0c3/weights/face_expression_model-shard1"
+    }
+  ]
+}

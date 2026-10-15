@@ -1,0 +1,39 @@
+project_id = "aira-app-tencent"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://localhost:8080"
+additional_redirect_urls = ["http://localhost:8080/**"]
+jwt_expiry = 3600
+enable_signup = true
+enable_anonymous_sign_ins = false
+minimum_password_length = 10
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = true
+
+[functions.aira-api]
+# Function verifies Bearer token using Supabase Auth, including ES256 project JWTs.
+verify_jwt = false
+
+[functions.aira-worker]
+# Separate constant-time worker secret check; this is never public authorization.
+verify_jwt = false
