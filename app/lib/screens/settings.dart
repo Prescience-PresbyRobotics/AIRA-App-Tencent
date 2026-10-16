@@ -45,6 +45,16 @@ class SettingsScreen extends StatelessWidget {
             subtitle: 'A few simple choices. All in your control.',
           ),
           _profile(c),
+          const AiraGap(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: OutlinedButton.icon(
+              key: const ValueKey('settings-logout'),
+              onPressed: () => _signOut(c),
+              icon: const Icon(Icons.logout_rounded),
+              label: Text(controller.preview ? 'Exit preview' : 'Log out'),
+            ),
+          ),
           const AiraGap(height: 20),
           AiraCardGrid(
             children: [
@@ -102,7 +112,7 @@ class SettingsScreen extends StatelessWidget {
               ),
               AiraSummaryCard(
                 title: 'Account & data',
-                subtitle: 'Manage your data or sign out',
+                subtitle: 'Manage your data or log out',
                 icon: Icons.manage_accounts_outlined,
                 color: AiraColors.lavender,
                 onTap: () => _open(c, 'Account & data'),
@@ -258,13 +268,13 @@ class SettingsScreen extends StatelessWidget {
               c,
               'store_conversations',
               'Save conversations',
-              'Keep chat and call transcripts across visits until you delete them. Turning this off deletes saved chats.',
+              'Keep chats and call transcripts across visits. Turning this off deletes both saved chats and call transcripts.',
             ),
             _toggle(
               c,
               'memory_enabled',
               'Saved memories',
-              'AIRA asks before saving a personal detail.',
+              'Automatically save details you share in text chats and calls. Review or remove them in About me.',
             ),
             _toggle(
               c,
@@ -288,7 +298,7 @@ class SettingsScreen extends StatelessWidget {
       ),
       const AiraGap(height: 12),
       const Notice(
-        'OpenAI handles text chat. ElevenLabs handles live calls. Call transcripts are kept separately in Call history when saving is on.',
+        'OpenAI handles text chat. ElevenLabs handles live calls. Saved chats, call transcripts and memories help AIRA keep context across both. Read full transcripts in Call history.',
         icon: Icons.cloud_outlined,
       ),
     ],
@@ -301,13 +311,13 @@ class SettingsScreen extends StatelessWidget {
               c,
               'social_reminders',
               'Invite me to chat',
-              'At most one gentle social invitation per day.',
+              'Save upcoming plans from chats and calls for follow-ups. At most one gentle social invitation per day.',
             ),
             _toggle(
               c,
               'medication_reminders',
               'Medication reminders',
-              'Your confirmed schedule stays in your control. Separate from social invitations.',
+              'Ask in chat or a call to set a reminder for medicine you already take. Review or edit the medicine and time in About me.',
             ),
           ],
         ),
@@ -418,9 +428,9 @@ class SettingsScreen extends StatelessWidget {
             ),
             const AiraGap(height: 12),
             OutlinedButton.icon(
-              onPressed: controller.signOut,
+              onPressed: () => _signOut(c),
               icon: const Icon(Icons.logout_rounded),
-              label: Text(controller.preview ? 'Exit preview' : 'Sign out'),
+              label: Text(controller.preview ? 'Exit preview' : 'Log out'),
             ),
           ],
         ),
@@ -430,11 +440,19 @@ class SettingsScreen extends StatelessWidget {
     ],
   };
 
+  Future<void> _signOut(BuildContext context) async {
+    try {
+      await controller.signOut();
+    } catch (e) {
+      if (context.mounted) showMessage(context, AiraController.cleanError(e));
+    }
+  }
+
   Future<void> _clearHistory(BuildContext c) async {
     if (await confirmAction(
       c,
       'Clear conversation history?',
-      'This deletes saved chats and call transcripts and ends any active call. Saved memories and reminders stay separate.',
+      'This deletes saved text chats and ends any active call. Call transcripts, saved memories and reminders have their own delete controls.',
       confirm: 'Clear history',
     )) {
       try {

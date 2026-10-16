@@ -24,6 +24,8 @@ class AiraMediaController extends ChangeNotifier {
   void setSpeakerMuted(bool muted) {}
   Future<void> refreshMicrophones() async {}
   Future<void> changeMicrophone(String deviceId) async {}
+  Future<void> refreshAudioDevices() async {}
+  Future<void> changeSpeaker(String deviceId) async {}
   Future<void> startCamera() async => notifyListeners();
   void stopCamera() {}
   void setDetection(bool enabled) => notifyListeners();

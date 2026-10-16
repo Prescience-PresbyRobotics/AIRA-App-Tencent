@@ -29,6 +29,14 @@ import {
 } from "../_shared/realtime.ts";
 import { handleCallArchives } from "../_shared/native_calls.ts";
 import { handleCallSchedule } from "../_shared/call_schedule.ts";
+import {
+  futureTime,
+  handleNativeCallTool,
+  nextLocalTime,
+  saveActions,
+  sharedContext,
+  textContext,
+} from "../_shared/conversation_actions.ts";
 const consentAliases: Record<string, string> = {
   store_conversations: "conversation_storage",
   memory_enabled: "memory",
@@ -125,28 +133,6 @@ function base64(bytes: Uint8Array) {
   return btoa(text);
 }
 
-function nextLocalTime(value: unknown, timeZone: string): string {
-  if (typeof value !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
-    throw new ApiError(400, "invalid_time", "Choose a time for the reminder.");
-  }
-  const format = new Intl.DateTimeFormat("en-GB", {
-    timeZone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
-  const start = Math.ceil(Date.now() / 60000) * 60000;
-  for (let i = 1; i < 1440; i++) {
-    const d = new Date(start + i * 60000);
-    if (format.format(d) === value) return d.toISOString();
-  }
-  throw new ApiError(
-    400,
-    "invalid_time",
-    "Choose a time within the next 24 hours.",
-  );
-}
-
 export function createHandler(
   get: Env = env,
   fetcher: typeof fetch = fetch,
@@ -188,6 +174,15 @@ export function createHandler(
           },
         });
       }
+      const path = new URL(req.url).pathname.replace(/^.*\/aira-api/, "");
+      if (path === "/v1/call-tools" && req.method === "POST") {
+        const toolDb = new Database(
+          get("SUPABASE_URL"),
+          supabaseServerKey(get),
+          fetcher,
+        );
+        return respond(await handleNativeCallTool(req, toolDb));
+      }
       const user = await resolveUser(req, get, fetcher);
       const db = new Database(
         get("SUPABASE_URL"),
@@ -203,7 +198,6 @@ export function createHandler(
         );
       }
       const url = new URL(req.url);
-      const path = url.pathname.replace(/^.*\/aira-api/, "");
       const method = req.method;
       const live = new Providers(get, fetcher);
       const audit = async (action: string, subject = user) =>
@@ -449,36 +443,22 @@ export function createHandler(
         let inputFlag: any = null;
         let outputFlag: any = null;
         let candidate = "";
+        let proposedActions: unknown[] = [];
+        let savedActions: any[] = [];
+        let actionNotice = "";
         try {
           inputFlag = await live.screen(text, "user");
           if (inputFlag.concern === "self_harm") {
             answer = SUPPORT_REPLY;
             status = "support";
           } else {
-            // After forgetting a memory, prior context is not accepted: every memory edit bumps consent_version.
-            // Client context is allowed only when it names the current privacy version.
-            let context = b.contextVersion === p.consent_version
-              ? safeContext(b.context)
-              : [];
-            if (p.consents.conversation_storage) {
-              const history = await db.request(
-                `messages?user_id=eq.${user}&conversation_id=eq.${r.conversation_id}&expires_at=gt.${nowFilter()}&context_version=eq.${p.consent_version}&request_id=neq.${r.id}&order=history_order.desc&limit=10`,
-              );
-              context = history.reverse().map((m: any) => ({
-                role: m.role,
-                content: m.text,
-              }));
+            const context = await textContext(db, user, p, text, r.id);
+            if (
+              !p.consents.conversation_storage &&
+              b.contextVersion === p.consent_version
+            ) {
+              context.recentConversation = safeContext(b.context);
             }
-            if (!context.length && b.introductionShown === true) {
-              context = [{ role: "assistant", content: FIRST_GREETING }];
-            }
-            const memories = p.consents.memory
-              ? await db.request(
-                `memories?${
-                  owned(user)
-                }&confirmed=eq.true&order=created_at.desc&limit=20`,
-              )
-              : [];
             let cue: string | undefined;
             if (
               p.consents.face_cues && b.cueSummary &&
@@ -497,14 +477,26 @@ export function createHandler(
             ) {
               cue = b.cueSummary.label;
             }
-            candidate = await live.reply(
-              [...context, { role: "user", content: text }],
-              memories.map((m: any) => m.text),
-              cue,
-              selfReportedFeeling,
+            const reply = await live.replyWithActions(
+              [{ role: "user", content: text }],
+              {
+                ...context,
+                temporaryFaceEstimate: cue ?? null,
+                selfReportedFeeling: selfReportedFeeling ?? null,
+              },
               p.display_name,
+              p.consents,
             );
-            outputFlag = await live.screen(candidate, "assistant");
+            candidate = reply.reply;
+            proposedActions = reply.actions;
+            outputFlag = await live.screen(
+              proposedActions.length
+                ? `${candidate}\nProposed saved details: ${
+                  JSON.stringify(proposedActions)
+                }`
+                : candidate,
+              "assistant",
+            );
             if (outputAllowed(outputFlag)) {
               answer = boundedText(candidate, 4000);
               status = "approved";
@@ -534,6 +526,21 @@ export function createHandler(
             p_priority: "review",
             p_synthetic: false,
           });
+        }
+        if (status === "approved" && proposedActions.length) {
+          const result = await saveActions(
+            db,
+            user,
+            p,
+            r.conversation_id,
+            proposedActions,
+            text,
+          );
+          savedActions = result.actions;
+          actionNotice = result.notices.join("\n");
+          if (actionNotice) {
+            answer = `${answer}\n\n${actionNotice}`.slice(0, 4000);
+          }
         }
         const finished = await db.rpc("aira_finish_message", {
           p_user: user,
@@ -565,6 +572,8 @@ export function createHandler(
           text: answer,
           status,
           speechToken,
+          actions: savedActions,
+          actionNotice,
           privacyVersion: p.consent_version,
           provider: status === "approved"
             ? "openai"
@@ -729,19 +738,9 @@ export function createHandler(
             : "social_reminders",
         );
         const b = await jsonBody(req);
-        const due = new Date(
+        const due = futureTime(
           b.dueAt ?? b.followupAt ?? nextLocalTime(b.localTime, p.timezone),
         );
-        if (
-          !Number.isFinite(due.getTime()) || due.getTime() <= Date.now() ||
-          due.getTime() >= Date.now() + 86400000
-        ) {
-          throw new ApiError(
-            400,
-            "invalid_time",
-            "Prototype reminders must be within the next 24 hours.",
-          );
-        }
         if (b.confirmed !== true) {
           throw new ApiError(
             400,
@@ -749,11 +748,15 @@ export function createHandler(
             "Review and confirm the reminder first.",
           );
         }
-        if (b.recurrence && b.recurrence !== "once") {
+        if (
+          b.recurrence &&
+          (b.recurrence !== "once" &&
+            (b.recurrence !== "daily" || scheduleList !== "medication"))
+        ) {
           throw new ApiError(
             400,
             "recurrence_unavailable",
-            "Recurring reminders are not enabled yet.",
+            "Only medicine reminders can repeat daily.",
           );
         }
         return respond({
@@ -764,7 +767,8 @@ export function createHandler(
             instructions: typeof b.instructions === "string"
               ? b.instructions.slice(0, 500)
               : "",
-            due_at: due.toISOString(),
+            due_at: due,
+            recurrence: b.recurrence || "once",
             timezone: p.timezone,
             confirmed: true,
           }),
@@ -794,19 +798,28 @@ export function createHandler(
           }
           change.enabled = b.enabled;
         }
-        if (b.dueAt !== undefined) {
-          const due = new Date(b.dueAt);
+        if (b.instructions !== undefined) {
+          change.instructions = typeof b.instructions === "string"
+            ? b.instructions.slice(0, 500)
+            : "";
+        }
+        if (b.recurrence !== undefined) {
           if (
-            !Number.isFinite(due.getTime()) || due.getTime() <= Date.now() ||
-            due.getTime() >= Date.now() + 86400000
+            !["once", "daily"].includes(b.recurrence) ||
+            (kind !== "medication" && b.recurrence !== "once")
           ) {
             throw new ApiError(
               400,
-              "invalid_time",
-              "Use a time within 24 hours.",
+              "invalid_recurrence",
+              "Only medicine reminders can repeat daily.",
             );
           }
-          change.due_at = due.toISOString();
+          change.recurrence = b.recurrence;
+        }
+        if (b.dueAt !== undefined || b.localTime !== undefined) {
+          change.due_at = futureTime(
+            b.dueAt ?? nextLocalTime(b.localTime, p.timezone),
+          );
         }
         const updated = await db.rpc("aira_schedule_edit", {
           p_user: user,
@@ -895,6 +908,12 @@ export function createHandler(
         try {
           const expires = Date.parse(session.expires_at);
           const token = await conversationToken(get, fetcher);
+          const context = await sharedContext(db, user, p);
+          await db.patch(
+            "realtime_sessions",
+            `conversation_id=eq.${conversation.id}&user_id=eq.${user}`,
+            { call_binding: reservation.callBinding },
+          );
           return respond({
             conversationId: conversation.id,
             conversationToken: token,
@@ -902,10 +921,15 @@ export function createHandler(
               aira_name: p.display_name || "friend",
               aira_call_id: conversation.id,
               aira_call_binding: reservation.callBinding,
+              aira_context: JSON.stringify(context),
+              aira_now: new Date().toISOString(),
+              aira_timezone: p.timezone,
               aira_greeting: b.invitationId
                 ? `Hey ${
                   p.display_name || "there"
                 }! It's Aira. I was looking forward to our catch-up. How's your day going?`
+                : p.display_name
+                ? `Hey ${p.display_name}! It's Aira. What have you been up to?`
                 : FIRST_GREETING,
             },
             expiresAt: new Date(expires).toISOString(),
@@ -941,16 +965,18 @@ export function createHandler(
             "Please start a new call after changing privacy choices.",
           );
         }
-        await db.patch(
-          "realtime_sessions",
-          `conversation_id=eq.${id}&user_id=eq.${user}`,
-          {
-            context: callContext(
-              await jsonBody(req),
-              p.consents.face_cues === true,
-            ),
-          },
-        );
+        const updated = await db.rpc("aira_update_call_context", {
+          p_user: user,
+          p_call: id,
+          p_version: p.consent_version,
+          p_context: callContext(
+            await jsonBody(req),
+            p.consents.face_cues === true,
+          ),
+        });
+        if (!updated) {
+          throw new ApiError(409, "call_expired", "Please start a new call.");
+        }
         return respond({ updated: true });
       }
       if (path === "/v1/calls" && method === "POST") {

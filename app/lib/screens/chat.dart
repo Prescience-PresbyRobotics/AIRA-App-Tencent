@@ -7,8 +7,9 @@ import '../controller.dart';
 import '../theme.dart';
 import '../widgets/companion.dart';
 import '../widgets/ui.dart';
-import '../media/aira_media.dart';
 import 'call.dart';
+import 'call_history.dart';
+import 'personal.dart';
 
 class ChatScreen extends StatefulWidget {
   final AiraController controller;
@@ -19,18 +20,19 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatState extends State<ChatScreen> {
   final draft = TextEditingController(), scroll = ScrollController();
-  final media = AiraMediaController();
   @override
   void initState() {
     super.initState();
     scrollToLatest();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.controller.refreshCallHistory();
+    });
   }
 
   @override
   void dispose() {
     draft.dispose();
     scroll.dispose();
-    media.dispose();
     super.dispose();
   }
 
@@ -49,7 +51,12 @@ class _ChatState extends State<ChatScreen> {
   Future<void> olderHistory() async {
     final offset = scroll.hasClients ? scroll.offset : 0.0;
     final extent = scroll.hasClients ? scroll.position.maxScrollExtent : 0.0;
-    await widget.controller.refreshHistory(older: true);
+    await Future.wait([
+      if (widget.controller.hasOlderHistory)
+        widget.controller.refreshHistory(older: true),
+      if (widget.controller.callHistoryCursor != null)
+        widget.controller.refreshCallHistory(older: true),
+    ]);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && scroll.hasClients) {
         scroll.jumpTo(
@@ -118,29 +125,14 @@ class _ChatState extends State<ChatScreen> {
     }
   }
 
-  Future<void> read(ChatTurn turn) async {
-    final epoch = widget.controller.revision;
-    try {
-      if (turn.speechToken == null) {
-        showMessage(context, 'Speech is unavailable for this message.');
-        return;
-      }
-      final bytes = await widget.controller.api.speech(turn.speechToken!);
-      if (!mounted || epoch != widget.controller.revision) return;
-      await media.playAudio(bytes, 'audio/mpeg');
-    } catch (e) {
-      if (mounted) showMessage(context, AiraController.cleanError(e));
-    }
-  }
-
-  void call(bool video) {
-    media.stopPlayback();
-    Navigator.push(
+  Future<void> call(bool video) async {
+    await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => CallScreen(controller: widget.controller, video: video),
       ),
     );
+    if (mounted) scrollToLatest();
   }
 
   @override
@@ -149,6 +141,21 @@ class _ChatState extends State<ChatScreen> {
     final roomy = MediaQuery.sizeOf(c).width > 740;
     final visible = ctl.visibleMessages;
     final opening = ctl.showIntroduction;
+    final entries =
+        <({DateTime time, ChatTurn? message, Map<String, dynamic>? call})>[
+          if (opening)
+            (
+              time: ctl.introduction.time,
+              message: ctl.introduction,
+              call: null,
+            ),
+          for (final message in visible)
+            (time: message.time, message: message, call: null),
+          for (final call in ctl.callHistory)
+            if (DateTime.tryParse(call['startedAt']?.toString() ?? '')
+                case final DateTime time)
+              (time: time.toLocal(), message: null, call: call),
+        ]..sort((a, b) => a.time.compareTo(b.time));
     return LayoutBuilder(
       builder: (context, bounds) {
         final scrollAll =
@@ -247,12 +254,12 @@ class _ChatState extends State<ChatScreen> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
               )
-            else if (ctl.hasOlderHistory)
+            else if (ctl.hasOlderHistory || ctl.callHistoryCursor != null)
               Center(
                 child: TextButton.icon(
                   onPressed: olderHistory,
                   icon: const Icon(Icons.history_rounded),
-                  label: const Text('Load earlier messages'),
+                  label: const Text('Load earlier messages and calls'),
                 ),
               ),
             if (ctl.historyError.isNotEmpty) ...[
@@ -281,20 +288,24 @@ class _ChatState extends State<ChatScreen> {
                   ),
                 ),
               ),
-            if (opening) ...[
-              _dateDivider(ctl.introduction.time),
-              _bubble(ctl.introduction, opening: true),
+            if (ctl.callHistoryError.isNotEmpty) ...[
+              Notice('Could not restore calls. ${ctl.callHistoryError}'),
+              TextButton(
+                onPressed: ctl.refreshCallHistory,
+                child: const Text('Retry call history'),
+              ),
             ],
-            for (final (index, message) in visible.indexed) ...[
-              if ((index == 0 && !opening) ||
-                  !DateUtils.isSameDay(
-                    message.time,
-                    index == 0
-                        ? ctl.introduction.time
-                        : visible[index - 1].time,
-                  ))
-                _dateDivider(message.time),
-              _bubble(message),
+            for (final (index, entry) in entries.indexed) ...[
+              if (index == 0 ||
+                  !DateUtils.isSameDay(entry.time, entries[index - 1].time))
+                _dateDivider(entry.time),
+              if (entry.message != null)
+                _bubble(
+                  entry.message!,
+                  opening: opening && entry.message == ctl.introduction,
+                )
+              else
+                _callCard(entry.call!),
             ],
             if (ctl.sending || ctl.historyAwaitingReply)
               const _TypingIndicator(),
@@ -432,6 +443,94 @@ class _ChatState extends State<ChatScreen> {
     );
   }
 
+  Widget _callCard(Map<String, dynamic> call) {
+    final video = call['mode'] == 'video';
+    final incoming = call['initiator'] == 'aira';
+    final date = DateTime.tryParse(call['startedAt']?.toString() ?? '');
+    return Align(
+      alignment: incoming ? Alignment.centerLeft : Alignment.centerRight,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 330),
+          child: Material(
+            color: incoming ? Colors.white : AiraColors.sage,
+            borderRadius: BorderRadius.circular(18),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              key: ValueKey('call-card-${call['id']}'),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => CallTranscriptScreen(
+                    controller: widget.controller,
+                    call: call,
+                  ),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      backgroundColor: AiraColors.forest.withValues(alpha: .08),
+                      child: Icon(
+                        video ? Icons.videocam_outlined : Icons.call_outlined,
+                        color: AiraColors.forest,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            video ? 'Video call' : 'Voice call',
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Icon(
+                                incoming
+                                    ? Icons.call_received
+                                    : Icons.call_made,
+                                size: 14,
+                                color: AiraColors.muted,
+                              ),
+                              const SizedBox(width: 4),
+                              Flexible(
+                                child: Text(
+                                  '${callDuration(call)}${date == null ? '' : ' · ${DateFormat('h:mm a').format(date.toLocal())}'}',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: AiraColors.muted,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Tap for transcript',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AiraColors.muted,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _bubble(ChatTurn m, {bool opening = false}) {
     final ctl = widget.controller;
     final time = DateFormat('h:mm a').format(m.time.toLocal());
@@ -562,15 +661,59 @@ class _ChatState extends State<ChatScreen> {
                   label: const Text('Retry'),
                 ),
               ],
-              if (m.fromAira && !opening && m.speechToken != null)
-                TextButton.icon(
-                  onPressed: () => read(m),
-                  icon: const Icon(Icons.volume_up_outlined, size: 18),
-                  label: const Text(
-                    'Read aloud',
-                    style: TextStyle(fontSize: 13),
+              if (m.fromAira &&
+                  m.actionNotice?.isNotEmpty == true &&
+                  !m.text.contains(m.actionNotice!))
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    m.actionNotice!,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: AiraColors.muted,
+                    ),
                   ),
                 ),
+              if (m.fromAira)
+                for (final action in m.actions.where(
+                  (action) => [
+                    'saved',
+                    'updated',
+                    'already_saved',
+                  ].contains(action['status']),
+                ))
+                  TextButton.icon(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => Scaffold(
+                          appBar: AppBar(title: const Text('About me')),
+                          body: ListenableBuilder(
+                            listenable: ctl,
+                            builder: (context, _) =>
+                                PersonalScreen(controller: ctl),
+                          ),
+                        ),
+                      ),
+                    ),
+                    icon: Icon(switch (action['kind']) {
+                      'medication' => Icons.medication_outlined,
+                      'event' => Icons.event_available_outlined,
+                      _ => Icons.bookmark_added_outlined,
+                    }, size: 17),
+                    label: Text(
+                      '${switch (action['kind']) {
+                        'medication' => 'Medicine reminder',
+                        'event' => 'Plan',
+                        _ => 'Memory',
+                      }} ${action['status'] == 'updated'
+                          ? 'updated'
+                          : action['status'] == 'already_saved'
+                          ? 'already saved'
+                          : 'saved'} · ${action['label'] ?? 'View in About me'}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ),
             ],
           ),
         ),

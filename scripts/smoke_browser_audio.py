@@ -8,7 +8,7 @@ Without --run, prints a plan without reading credentials or contacting providers
 """
 import argparse
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import os
@@ -45,7 +45,7 @@ def audio_file(path):
 def validated_result(data):
     require(isinstance(data, dict) and data.get('reason') in REASONS, 'Invalid browser test result.')
     result = {key: data.get(key) is True for key in ('success', 'recognized', 'reply')}
-    for key in ('seconds', 'microphoneStreams', 'inputPeak', 'replyOutputPeak'):
+    for key in ('seconds', 'microphoneStreams', 'inputPeak', 'replyOutputPeak', 'audibleReplyPeak'):
         value = data.get(key)
         require(isinstance(value, (int, float)) and not isinstance(value, bool)
                 and math.isfinite(value) and 0 <= value <= 1000, 'Invalid browser test measurement.')
@@ -53,7 +53,7 @@ def validated_result(data):
     result['reason'] = data['reason']
     result['success'] = (result['success'] and result['recognized'] and result['reply']
                          and result['microphoneStreams'] >= 2 and result['inputPeak'] > .01
-                         and result['replyOutputPeak'] > .01
+                         and result['replyOutputPeak'] > .01 and result['audibleReplyPeak'] > .01
                          and result['reason'] == 'audio_recognized_and_answered')
     return result
 
@@ -65,9 +65,12 @@ def main():
     parser.add_argument('--origin', type=origin, default='http://localhost:8080',
                         help='Already allowed app origin used by server-side test API calls')
     parser.add_argument('--port', type=int, default=8766)
-    parser.add_argument('--timeout', type=int, default=180, help='Whole-run browser wait, 90–600 seconds')
+    parser.add_argument('--timeout', type=int, default=240, help='Per-call browser wait, 90–600 seconds')
+    parser.add_argument('--calls', type=int, choices=(1, 2), default=2,
+                        help='Two same-page calls verify hangup/restart audio (default: 2)')
     parser.add_argument('--audio-file', type=Path)
     parser.add_argument('--expect', nargs='+', help='Words or short phrases that must ALL be recognized')
+    parser.add_argument('--shared-context', action='store_true', help='Verify text-to-call context plus native automatic memory and plan tools using the documented fixture.')
     parser.add_argument('--run', action='store_true')
     parser.add_argument('--cleanup-run', type=uuid.UUID)
     args = parser.parse_args()
@@ -78,7 +81,7 @@ def main():
             'Linked checkout does not match --project-ref.')
     if not args.run and not args.cleanup_run:
         print('Plan only; no credentials, network, accounts or providers accessed.')
-        print('With --run: create one marked account/call, serve a localhost-only browser test,')
+        print('With --run: create one marked account and up to two calls on the same browser page,')
         print('stream generated WAV speech through the actual ElevenLabs WebRTC SDK, verify')
         print('expected transcription plus a new non-filler spoken reply, and remove the account.')
         print('Requires --audio-file (mono 16 kHz PCM WAV) and --expect word [word ...].')
@@ -104,7 +107,7 @@ def main():
     local_origin = f'http://{host}'
     call, server, outcome, archive = None, None, None, None
     page = (ROOT / 'scripts/smoke_browser_audio.html').read_text().replace(
-        '__AIRA_TEST_CONFIG__', json.dumps({'nonce': nonce, 'expected': args.expect}))
+        '__AIRA_TEST_CONFIG__', json.dumps({'nonce': nonce, 'expected': args.expect, 'calls': args.calls, 'sharedContext': args.shared_context}))
     assets = {
         '/': (page.encode(), 'text/html; charset=utf-8'),
         '/speech.wav': (audio, 'audio/wav'),
@@ -156,7 +159,7 @@ def main():
 
         def do_POST(self):
             nonlocal outcome, archive
-            if self.path != '/result':
+            if self.path not in ('/result', '/checkpoint'):
                 self.send_error(404)
                 return
             if not self.allowed(private=True):
@@ -165,6 +168,10 @@ def main():
                 size = int(self.headers.get('Content-Length', 0))
                 require(0 < size <= 262144, 'Result body too large.')
                 body = json.loads(self.rfile.read(size))
+                if self.path == '/checkpoint':
+                    smoke.app('POST', '/calls/' + call['conversationId'] + '/transcript', 'Live caption checkpoint', body)
+                    self.send(204)
+                    return
                 outcome = validated_result(body)
                 archive = body.get('archive')
             except (ValueError, SmokeError, OSError):
@@ -179,7 +186,7 @@ def main():
                    'started_at': datetime.now(timezone.utc).isoformat()}, stream)
     print(f'Synthetic test run: {run_id}', flush=True)
     try:
-        server = HTTPServer(('127.0.0.1', args.port), Handler)
+        server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
         server.timeout = 1
         password = secrets.token_urlsafe(32) + 'Aa9!'
         _, created, _, _ = smoke.admin('POST', '', 'Synthetic account creation', {
@@ -192,40 +199,62 @@ def main():
         smoke.token = login.get('access_token')
         require(isinstance(smoke.token, str) and len(smoke.token) > 40, 'No synthetic access token.')
         _, me, _, _ = smoke.app('GET', '/me', 'Initialize synthetic profile')
-        choices = {key: key == 'conversation_storage' for key in me['profile']['consents']}
+        choices = {key: key == 'conversation_storage' or (args.shared_context and key in ('memory', 'social_reminders', 'medication_reminders')) for key in me['profile']['consents']}
         smoke.app('PATCH', '/preferences', 'Keep only synthetic transcript storage', {'consents': choices})
-        _, call, _, _ = smoke.app('POST', '/calls/session', 'WebRTC token mint', {'mode': 'voice'}, expected=(201,))
-        print(f'READY: open {local_origin}/ and click Run synthetic WebRTC call.', flush=True)
-        print('No physical microphone or camera is accessed. Keep this test page visible.', flush=True)
-        deadline = time.monotonic() + args.timeout
-        while outcome is None and time.monotonic() < deadline:
-            server.handle_request()
-        require(outcome is not None, 'Browser test deadline expired.')
-        require(outcome['success'], 'Browser WebRTC audio test did not pass; see safe measurements above.')
-        require(isinstance(archive, dict) and isinstance(archive.get('entries'), list), 'No browser transcript to archive.')
-        smoke.app('POST', '/calls/' + call['conversationId'] + '/transcript', 'Archive browser captions', archive)
-        smoke.app('POST', '/calls/' + call['conversationId'] + '/end', 'End native call', {})
-        _, history, _, _ = smoke.app('GET', '/history', 'Text isolation')
-        require(history.get('messages') == [], 'Call transcript leaked into main text history.')
-        _, detail, _, _ = smoke.app('GET', '/calls/' + call['conversationId'] + '/transcript', 'Read call transcript')
-        require(len(detail.get('messages', [])) >= 2, 'Call captions were not saved separately.')
-        provider_verified = detail.get('call', {}).get('source') == 'elevenlabs'
-        for _ in range(2):
-            if provider_verified:
-                break
-            time.sleep(11)
-            _, detail, _, _ = smoke.app('GET', '/calls/' + call['conversationId'] + '/transcript', 'Canonical transcript recovery')
+        if args.shared_context:
+            _, me, _, _ = smoke.app('GET', '/me', 'Current privacy version')
+            _, reply, _, _ = smoke.app('POST', '/messages', 'Seed text memory', {
+                'clientMessageId': str(uuid.uuid4()), 'mode': 'text',
+                'contextVersion': me['profile']['consent_version'],
+                'text': 'My favorite fruit is mango. Please remember that.',
+            })
+            require(reply.get('status') == 'approved', 'Text memory seed failed.')
+        for call_number in range(1, args.calls + 1):
+            outcome, archive = None, None
+            _, call, _, _ = smoke.app('POST', '/calls/session', 'WebRTC token mint', {'mode': 'voice'}, expected=(201,))
+            if args.shared_context:
+                require('mango' in str(call.get('dynamicVariables', {}).get('aira_context', '')).lower(), 'Text context missing from native call.')
+            print(f'READY call {call_number}/{args.calls}: open {local_origin}/ and click the Run button. Keep this same page for the next call.', flush=True)
+            print('No physical microphone or camera is accessed. Keep this test page visible.', flush=True)
+            deadline = time.monotonic() + args.timeout
+            while outcome is None and time.monotonic() < deadline:
+                server.handle_request()
+            require(outcome is not None, 'Browser test deadline expired.')
+            require(outcome['success'], 'Browser WebRTC audio test did not pass; see safe measurements above.')
+            require(isinstance(archive, dict) and isinstance(archive.get('entries'), list), 'No browser transcript to archive.')
+            smoke.app('POST', '/calls/' + call['conversationId'] + '/transcript', 'Archive browser captions', archive)
+            smoke.app('POST', '/calls/' + call['conversationId'] + '/end', 'End native call', {})
+            _, history, _, _ = smoke.app('GET', '/history', 'Text isolation')
+            require(all(item.get('mode') == 'text' for item in history.get('messages', [])), 'Call transcript leaked into main text history.')
+            _, detail, _, _ = smoke.app('GET', '/calls/' + call['conversationId'] + '/transcript', 'Read call transcript')
+            require(len(detail.get('messages', [])) >= 2, 'Call captions were not saved separately.')
             provider_verified = detail.get('call', {}).get('source') == 'elevenlabs'
-        require(provider_verified, 'Provider transcript ownership/recovery was not verified.')
+            for _ in range(2):
+                if provider_verified:
+                    break
+                time.sleep(11)
+                _, detail, _, _ = smoke.app('GET', '/calls/' + call['conversationId'] + '/transcript', 'Canonical transcript recovery')
+                provider_verified = detail.get('call', {}).get('source') == 'elevenlabs'
+            require(provider_verified, 'Provider transcript ownership/recovery was not verified.')
+        if args.shared_context:
+            _, notes, _, _ = smoke.app('GET', '/memories', 'Verify native memories')
+            print('Native save check: ' + json.dumps({'memory_count': len(notes.get('memories', [])), 'providerConversationId': archive.get('providerConversationId')}), flush=True)
+            require('tomato' in json.dumps(notes).lower(), 'Native tool did not save the spoken user fact.')
+            _, plans, _, _ = smoke.app('GET', '/events/proposals', 'Verify native plans')
+            require('botanical' in json.dumps(plans).lower(), 'Native tool did not save the spoken upcoming plan.')
+            require('mango' in ' '.join(item.get('text', '') for item in detail.get('messages', []) if item.get('role') == 'assistant').lower(), 'Native reply did not recall text-chat fruit context.')
+            print('PASS: native call recalled text context and saved spoken memory/plan through ElevenLabs tools.', flush=True)
         _, me, _, _ = smoke.app('GET', '/me', 'Current privacy version')
         _, reply, _, _ = smoke.app('POST', '/messages', 'Text immediately after native call', {
             'clientMessageId': str(uuid.uuid4()), 'mode': 'text',
             'contextVersion': me['profile']['consent_version'],
-            'text': 'That was a nice chat about my garden. The tomatoes are growing well.',
+            'text': 'Where am I going tomorrow?' if args.shared_context else 'That was a nice chat about my garden. The tomatoes are growing well.',
         })
         require(reply.get('status') == 'approved' and bool(reply.get('text')), 'Text after call did not return a reply.')
+        if args.shared_context:
+            require('botanical' in reply.get('text', '').lower(), 'Text chat did not recall native call plan.')
         _, history, _, _ = smoke.app('GET', '/history', 'Read separate text history')
-        require(len(history.get('messages', [])) == 2 and all(item.get('mode') == 'text' for item in history['messages']), 'Text and call histories are not isolated.')
+        require(len(history.get('messages', [])) == (4 if args.shared_context else 2) and all(item.get('mode') == 'text' for item in history['messages']), 'Text and call histories are not isolated.')
         print('PASS: separately saved canonical ElevenLabs transcript, verified ownership, isolated main chat and text reply after call.', flush=True)
     finally:
         if server:
@@ -242,7 +271,7 @@ def main():
         except (SmokeError, OSError):
             print(f'Cleanup requires retry: --project-ref {args.project_ref} --cleanup-run {run_id}', file=sys.stderr)
             raise SmokeError('Could not verify cleanup; non-secret recovery journal preserved.') from None
-    print('PASS: real browser WebRTC audio input, transcription and spoken reply. Physical devices remain separate.')
+    print(f'PASS: {args.calls} same-page browser WebRTC calls with recognized input and unmuted output playback. Physical devices remain separate.')
 
 
 if __name__ == '__main__':

@@ -243,6 +243,13 @@ Deno.test("Message route with unsafe or failed checker never returns or stores u
           request: { id: requestId, conversation_id: requestId },
         });
       }
+      if (url.includes("/rpc/aira_shared_context")) {
+        return Response.json({
+          memories: [],
+          plans: [],
+          recentConversation: [],
+        });
+      }
       if (url.includes("/rpc/aira_incident")) return Response.json(null);
       if (url.includes("/rpc/aira_finish_message")) {
         writes.push(b);
@@ -253,7 +260,7 @@ Deno.test("Message route with unsafe or failed checker never returns or stores u
         const text = openaiCalls === 1
           ? JSON.stringify(safe)
           : openaiCalls === 2
-          ? "UNCHECKED DANGEROUS OUTPUT"
+          ? JSON.stringify({ reply: "UNCHECKED DANGEROUS OUTPUT", actions: [] })
           : invalidChecker
           ? "malformed"
           : JSON.stringify({ ...urgent, concern: "harmful_advice" });

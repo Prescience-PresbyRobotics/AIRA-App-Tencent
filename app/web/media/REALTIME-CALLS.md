@@ -38,7 +38,10 @@ for microphone permission if needed. Preview mode does not start a provider call
     aira_name: '...',
     aira_greeting: '...',
     aira_call_id: '...',
-    aira_call_binding: '...'
+    aira_call_binding: '...',
+    aira_context: '...',
+    aira_now: '...',
+    aira_timezone: 'Asia/Singapore'
   },
   useWakeLock: false
 }
@@ -55,7 +58,7 @@ remove the deployed helper after setup. The retired `aira-realtime` route return
 410 so old browser builds cannot silently keep using the former OpenAI bridge.
 
 The configured native model is `deepseek-v41-flash`; Scribe Realtime recognizes
-speech and Jessica/`eleven_flash_v2` speaks. The agent's automatic thinking cue is
+speech and the user-selected kid voice `La9lzDJ3mmfNhhQA06WM`/`eleven_flash_v2` speaks. The agent's automatic thinking cue is
 disabled (`soft_timeout_config.timeout_seconds=-1`), and its prompt forbids repeated
 “Hmm, let me think” filler. Native calls use the provider's conversational behavior
 and prompt safeguards; they are not buffered through AIRA's OpenAI text-screening
@@ -72,9 +75,7 @@ owner's transcript. A labelled device-caption fallback remains if canonical
 recovery is unavailable. Provider transcript recovery is bounded and respects
 storage opt-out, account deletion and individual archive deletion.
 
-Call text lives only in **Settings → Call history**, not the main chat window or
-text-chat model context. It stays while Save conversations is enabled until the
-owner deletes it. A late response cannot recreate a removed archive. Starting and
+Full call transcripts live in **Settings → Call history**; compact call cards also appear chronologically in the main chat and open the same transcript. Saved text chats and call transcripts supply shared context to both text replies and native calls, within the current consent version. A bounded recent window and explicit older-context search prevent an unbounded prompt; this is not a promise that every historical word fits in each request. Saved call text stays while Save conversations is enabled until the owner deletes it. A late response cannot recreate a removed archive. Starting and
 ending a call never clears the separate text thread; native call turns do not use
 text-message quota. Preview calls/transcripts are clearly labelled examples.
 
@@ -85,7 +86,7 @@ captions and closes server call state. Spoken interruptions are handled by the
 ElevenLabs VAD/WebRTC SDK. Duration begins only after a successful connection. The
 interface uses actual caption/mode/audio-level events; the mascot is animated with
 waves, hops, stretches, blinks, listening nods and speaking reactions, with no
-eyebrows and with reduced-motion support.
+eyebrows and with reduced-motion support. Video adds a drawn park scene, wider mascot movement and a larger local camera preview.
 
 The SDK currently provides no AbortSignal for its pending microphone permission
 request. During the session, the adapter narrowly guards its audio `getUserMedia`
@@ -93,7 +94,7 @@ requests, remembers obtained tracks and immediately stops streams that arrive af
 End or page hiding. Video requests pass through untouched. A new call is refused
 while an earlier SDK connection is unresolved; this prevents old asynchronous work
 from capturing for a new session. The original browser function is restored when
-cleanup settles. There is no automatic reconnect or background resume in AIRA.
+cleanup settles. New sessions explicitly reset output to an audible level; teardown waits for the prior SDK session and clears stale audio/connection state before another call can start. There is no automatic reconnect or background resume in AIRA.
 
 A video-call action opens the local camera after audio connects; voice calls can
 enable it explicitly. Facial analysis needs the saved `face_cues` setting and browser
@@ -101,7 +102,15 @@ camera permission. Only fresh single-face expression labels/timestamps and optio
 self-reported feelings may become transient native-agent context. Unknown, stale,
 no-face, multiple-face and disabled states clear the estimate. Self-report takes
 priority and stays separate. No camera frame is sent, and the prompt must not pretend
-to see video or diagnose how someone feels.
+to see raw video or diagnose how someone feels. The overlay shows the short expression name without a “detected emotion” prefix. A stable, fresh, non-neutral cue can become eligible for one gentle follow-up during silence; rate limits, speaking/mute state and self-reported feelings take priority. This is a fallible check-in, never a stored fact or a diagnosis.
+
+## Shared context and automatic notes
+
+The agent prompt receives owner-scoped saved context plus the current timestamp/timezone, and is configured with `aira_conversation_actions`. Its bound webhook can search older context or save a user-stated memory, clear future plan or explicitly requested existing-medicine reminder. It uses ElevenLabs to decide and speak; these live tools call Supabase directly and do not invoke OpenAI. The tool receives the call ID and high-entropy binding from server-created dynamic variables, not model-generated identifiers. The backend checks the live session, owner, consent version and relevant feature switch before writes. Source quotations must match recent user captions; a short bounded retry handles caption/tool races. Never claim a save until the tool returns a successful receipt.
+
+Text chat uses its own structured action extraction inside its existing screened OpenAI reply flow, with source evidence and the same database action path. Only current user statements can generate new saves; archived material is context, not new evidence. Memory corrections reuse semantic keys, upcoming plans need a clear future date/time, and medication tools never prescribe or invent doses. The user can review/remove notes and schedules in About me. Forget/delete and consent-version boundaries still apply to shared retrieval.
+
+Current configuration passed two consecutive real browser WebRTC calls on the same page with generated speech and verified unmuted reply playback. A separate full native call recalled text-chat context, saved both a spoken fact and future plan, and supplied context for a later text reply. Canonical transcript recovery and synthetic-account cleanup passed. The native prompt was refined after an earlier test saved the plan but skipped the separate fact. Physical microphone/camera acceptance remains separate. Older evidence below used Jessica and no shared action tool.
 
 ## Scheduled incoming calls
 
@@ -134,8 +143,7 @@ system muting. The input/output meters come from the SDK's actual audio analyser
 silence is not treated as a failure or proof that the provider heard speech.
 The microphone chooser calls `changeInputDevice({inputDeviceId})`; additional
 sample-rate/format options are unsupported by the bundled SDK's WebRTC path.
-Speaker mute changes output volume and does not change the operating system's
-speaker/headphone routing. Device names are local UI state, never sent to AIRA.
+Speaker mute changes output volume. The app also offers an output-device chooser where the browser/SDK supports `changeOutputDevice`; otherwise it uses the system default and explains the browser limitation. Device names are local UI state, never sent to AIRA.
 
 ## Verification and limits
 
@@ -159,11 +167,10 @@ not exercise microphone ingestion and is not used as evidence for this result.
 
 Native iOS/Android Flutter media adapters remain unimplemented. Use the browser
 build. Physical devices, permission flows, realistic interruption/echo, call limits
-and actual provider deletion still need separate verification. Jessica remains the
-user-confirmed live voice. Current test/deployment results must identify the native
+and actual provider deletion still need separate verification. The user-selected live voice is now the kid voice `La9lzDJ3mmfNhhQA06WM`; the provider accepted it for the native agent. Current test/deployment results must identify the native
 agent configuration actually exercised; earlier custom-bridge timings do not apply.
 
-Current native-call release verification (16 October 2026): **72 Flutter tests and 42 Deno tests passed**, plus both JavaScript media lifecycle suites and a connected release web build. Supabase migrations004–006 and API/worker/retired-bridge functions are deployed; Firebase Hosting `aira-app-tencent` is updated. The private native agent settings were read back with `deepseek-v41-flash`, Jessica, no custom LLM or fallback, auth enabled and thinking filler disabled. A real browser WebRTC run with generated speech recognized the input and returned a spoken reply (16.1seconds for the entire fixture, not a response-latency benchmark). It then recovered the canonical provider transcript with ownership validation, verified that main text history contained no call turns, and sent a successful text message after hangup. A separate cloud check produced an invitation at the selected minute, accepted it and obtained a native session with Aira's scheduled opening greeting. Test accounts were removed and cleanup verified; the temporary setup function was deleted. Physical-device acceptance remains pending.
+Previous native-call release verification (16 October 2026, before shared context and the kid voice): **72 Flutter tests and 42 Deno tests passed**, plus both JavaScript media lifecycle suites and a connected release web build. Supabase migrations004–006 and API/worker/retired-bridge functions are deployed; Firebase Hosting `aira-app-tencent` is updated. The private native agent settings were read back with `deepseek-v41-flash`, Jessica, no custom LLM or fallback, auth enabled and thinking filler disabled. A real browser WebRTC run with generated speech recognized the input and returned a spoken reply (16.1seconds for the entire fixture, not a response-latency benchmark). It then recovered the canonical provider transcript with ownership validation, verified that main text history contained no call turns, and sent a successful text message after hangup. A separate cloud check produced an invitation at the selected minute, accepted it and obtained a native session with Aira's scheduled opening greeting. Test accounts were removed and cleanup verified; the temporary setup function was deleted. Physical-device acceptance remains pending.
 
 ## Repeat the synthetic browser audio test
 

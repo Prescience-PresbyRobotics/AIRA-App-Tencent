@@ -43,7 +43,7 @@ measured accuracy or calibrated emotional certainty**. The UI never shows them
 as accuracy percentages. Estimates older than five seconds disappear.
 
 Upstream output categories: neutral, happy, sad, angry, fearful, disgusted,
-surprised. The app displays **AI-estimated emotion: [label]**. No face, multiple
+surprised. The call overlay displays the short expression name, such as **Happy** or **Neutral**. Call settings explain that expressions are uncertain estimates and offer a self-report correction. No face, multiple
 faces, unclear/low-quality face, weak/ambiguous output, stale camera, disabled
 analysis and model errors are distinct unavailable/unknown/off states. An
 unavailable estimate is never converted to neutral.

@@ -1,7 +1,7 @@
 // Temporary infrastructure helper. Deploy explicitly, invoke with worker secret, then delete.
 import { sameSecret } from "../_shared/domain.ts";
 import { env } from "../_shared/runtime.ts";
-import { nativeAgentSettings } from "../_shared/voice_agent.ts";
+import { nativeAgentSettings, nativeConversationTool } from "../_shared/voice_agent.ts";
 Deno.serve(async (req) => {
   const secret = env("AIRA_WORKER_SECRET");
   const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -32,9 +32,24 @@ Deno.serve(async (req) => {
     if (operation.action === "configure-native") {
       const voiceId = env("ELEVENLABS_REALTIME_VOICE_ID");
       if (!voiceId) return reply({error: "missing_voice"}, 503);
-      const settings = nativeAgentSettings(voiceId);
+      const apiBase = `${env("SUPABASE_URL")}/functions/v1/aira-api`;
+      const tool = nativeConversationTool(apiBase);
+      const listed = await api("tools");
+      const existing = (listed.tools ?? []).find((t: any) =>
+        t.tool_config?.name === tool.tool_config.name && t.tool_config?.api_schema?.url === tool.tool_config.api_schema.url);
+      const saved = existing
+        ? await api(`tools/${encodeURIComponent(existing.id ?? existing.tool_id)}`, "PATCH", tool)
+        : await api("tools", "POST", tool);
+      const toolId = saved.id ?? saved.tool_id ?? existing?.id ?? existing?.tool_id;
+      if (!toolId) throw {message: "Provider did not return the conversation tool identifier."};
+      const settings = nativeAgentSettings(voiceId, [toolId]);
       if (agentId) await api(`agents/${encodeURIComponent(agentId)}`, "PATCH", settings);
       else agentId = (await api("agents/create", "POST", settings)).agent_id;
+    } else if (operation.action === "set-requested-voice") {
+      if (!agentId) return reply({error: "missing_agent"}, 503);
+      await api(`agents/${encodeURIComponent(agentId)}`, "PATCH", {
+        conversation_config: {tts: {voice_id: "La9lzDJ3mmfNhhQA06WM", model_id: "eleven_flash_v2"}},
+      });
     } else if (operation.action !== "inspect") return reply({error: "unsupported_action"}, 400);
     if (!agentId) return reply({error: "missing_agent"}, 503);
     const b = await api(`agents/${encodeURIComponent(agentId)}`);
@@ -51,6 +66,7 @@ Deno.serve(async (req) => {
       asr: b.conversation_config?.asr?.provider,
       softTimeoutSeconds: b.conversation_config?.turn?.soft_timeout_config?.timeout_seconds,
       ttsModel: b.conversation_config?.tts?.model_id,
+      toolIds: b.conversation_config?.agent?.prompt?.tool_ids ?? [],
       configured: true,
     });
   } catch (error) {

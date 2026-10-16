@@ -99,16 +99,13 @@ Deno.test("Message API persists delivered input before providers and excludes it
       events.push("saved-input");
       return Response.json(true);
     }
-    if (url.pathname.endsWith("/messages")) {
+    if (url.pathname.endsWith("/aira_shared_context")) {
       assert(
-        url.searchParams.get("request_id") === `neq.${request}`,
-        "Current input must not be duplicated in historical context",
+        body.p_exclude === request && body.p_user === USER &&
+          body.p_version === 3,
+        "Shared context excludes current input and old privacy epochs",
       );
-      assert(
-        url.searchParams.get("context_version") === "eq.3",
-        "Forgotten/older privacy-version context cannot be reused",
-      );
-      return Response.json([]);
+      return Response.json({ memories: [], plans: [], recentConversation: [] });
     }
     if (url.hostname === "api.openai.com") {
       assert(
@@ -116,7 +113,7 @@ Deno.test("Message API persists delivered input before providers and excludes it
         "Input is saved before any provider work",
       );
       events.push("provider");
-      const text = body.text?.format
+      const text = body.text?.format?.name === "aira_screening"
         ? JSON.stringify({
           safe: true,
           concern: "none",
@@ -127,7 +124,10 @@ Deno.test("Message API persists delivered input before providers and excludes it
           evidence: "",
           reason: "benign fixture",
         })
-        : "Hello, lovely to hear from you.";
+        : JSON.stringify({
+          reply: "Hello, lovely to hear from you.",
+          actions: [],
+        });
       return Response.json({
         status: "completed",
         output: [{ type: "message", content: [{ type: "output_text", text }] }],

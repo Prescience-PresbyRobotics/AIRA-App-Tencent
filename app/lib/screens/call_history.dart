@@ -30,7 +30,7 @@ class _CallHistoryState extends State<CallHistoryScreen> {
         title: 'Call history',
         children: [
           const Notice(
-            'Voice and video transcripts live here. They stay separate from your text chat. Audio recordings are not saved by AIRA.',
+            'Read your voice and video transcripts here, or tap a call in your chat. AIRA can use saved chats and calls for context. Audio recordings are not saved by AIRA.',
             icon: Icons.history_rounded,
           ),
           const AiraGap(height: 18),

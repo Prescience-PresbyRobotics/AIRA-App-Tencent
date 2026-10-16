@@ -130,22 +130,22 @@ class _OnboardingState extends State<OnboardingScreen> {
                   _choice(
                     'store_conversations',
                     'Save our conversations',
-                    'Keep chat and call transcripts across visits until you delete them. Turn off for session-only chat.',
+                    'Keep chats and call transcripts across visits so AIRA can pick up where you left off in text or calls. You can delete them anytime.',
                   ),
                   _choice(
                     'memory_enabled',
                     'Remember what matters',
-                    'Only save details you explicitly confirm.',
+                    'Automatically remember details you share in chats and calls. Review or remove them in About me.',
                   ),
                   _choice(
                     'social_reminders',
                     'Invite me to chat',
-                    'Allow gentle check-ins. Quiet hours: 9 PM–9 AM Singapore time.',
+                    'Save upcoming plans you mention for gentle follow-ups. AIRA asks if the timing is unclear. Quiet hours: 9 PM–9 AM Singapore time.',
                   ),
                   _choice(
                     'medication_reminders',
                     'Medication reminders',
-                    'Remind you about a schedule you confirm.',
+                    'Ask in chat or a call to set a reminder for medicine you already take. Tell AIRA the medicine and time, or add it in About me.',
                   ),
                   _choice(
                     'impact_measurement',

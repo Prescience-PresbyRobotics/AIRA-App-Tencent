@@ -17,6 +17,17 @@ class AudioInputDevice {
       );
 }
 
+class AudioOutputDevice {
+  const AudioOutputDevice({required this.id, required this.label});
+  final String id, label;
+
+  factory AudioOutputDevice.fromJson(Map<String, dynamic> json) =>
+      AudioOutputDevice(
+        id: json['id'] as String,
+        label: json['label'] as String,
+      );
+}
+
 /// Facial estimates and user-reported feelings deliberately have separate data.
 /// This state contains only local model output, never a self-reported correction.
 class AiraMediaState {
@@ -46,6 +57,13 @@ class AiraMediaState {
     this.selectedMicrophoneId,
     this.availableMicrophones = const [],
     this.changingMicrophone = false,
+    this.availableSpeakers = const [],
+    this.selectedSpeakerId = 'default',
+    this.speakerName = 'System default',
+    this.speakerSelectionSupported = false,
+    this.changingSpeaker = false,
+    this.speakerIssue,
+    this.lastUserActivityAt,
     this.userCaption,
     this.agentCaption,
     this.realtimeError,
@@ -59,6 +77,11 @@ class AiraMediaState {
   final double inputLevel, outputLevel;
   final String? microphoneIssue, microphoneName, selectedMicrophoneId;
   final List<AudioInputDevice> availableMicrophones;
+  final List<AudioOutputDevice> availableSpeakers;
+  final String selectedSpeakerId, speakerName;
+  final bool speakerSelectionSupported, changingSpeaker;
+  final String? speakerIssue;
+  final DateTime? lastUserActivityAt;
   final String? userCaption, agentCaption, realtimeError;
   final DateTime? realtimeConnectedAt;
   final String? voiceConversationId;
@@ -78,7 +101,7 @@ class AiraMediaState {
   bool get microphoneBusy => microphone == 'requesting';
   String get emotionText => emotion == null
       ? (reason ?? 'Unable to detect')
-      : 'AI-estimated emotion: ${emotion![0].toUpperCase()}${emotion!.substring(1)}';
+      : '${emotion![0].toUpperCase()}${emotion!.substring(1)}';
 
   factory AiraMediaState.fromJson(Map<String, dynamic> json) => AiraMediaState(
     realtimeStatus: json['realtimeStatus'] as String? ?? 'idle',
@@ -92,6 +115,20 @@ class AiraMediaState {
     microphoneName: json['microphoneName'] as String?,
     selectedMicrophoneId: json['selectedMicrophoneId'] as String?,
     changingMicrophone: json['changingMicrophone'] == true,
+    selectedSpeakerId: json['selectedSpeakerId'] as String? ?? 'default',
+    speakerName: json['speakerName'] as String? ?? 'System default',
+    speakerSelectionSupported: json['speakerSelectionSupported'] == true,
+    changingSpeaker: json['changingSpeaker'] == true,
+    speakerIssue: json['speakerIssue'] as String?,
+    lastUserActivityAt: json['lastUserActivityAt'] is num
+        ? DateTime.fromMillisecondsSinceEpoch(
+            (json['lastUserActivityAt'] as num).toInt(),
+          )
+        : null,
+    availableSpeakers: (json['availableSpeakers'] as List? ?? [])
+        .whereType<Map<String, dynamic>>()
+        .map(AudioOutputDevice.fromJson)
+        .toList(),
     availableMicrophones: (json['availableMicrophones'] as List? ?? [])
         .whereType<Map<String, dynamic>>()
         .map(AudioInputDevice.fromJson)

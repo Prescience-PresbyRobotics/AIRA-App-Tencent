@@ -7,7 +7,10 @@
     realtimeError: null, realtimeConnectedAt: null, speakerMuted: false,
     inputLevel: 0, outputLevel: 0, awaitingReply: false, microphoneIssue: null,
     microphoneName: null, selectedMicrophoneId: null, availableMicrophones: [],
-    changingMicrophone: false, callTranscript: []};
+    changingMicrophone: false, availableSpeakers: [], selectedSpeakerId: 'default',
+    speakerName: 'System default', speakerSelectionSupported: false,
+    changingSpeaker: false, speakerIssue: null, lastUserActivityAt: null,
+    callTranscript: []};
   let sdkPromise, session, pendingStart, pendingEnd, guard;
   let epoch = 0;
   let deviceChangeListener, microphoneSelectionError;
@@ -87,10 +90,15 @@
     try {
       state.inputLevel = session && !state.micMuted ? level(session.getInputVolume()) : 0;
       state.outputLevel = session && !state.speakerMuted ? level(session.getOutputVolume()) : 0;
+      // Local activity protects quiet check-ins from interrupting speech before
+      // the provider's final transcript arrives. This is not an emotion signal.
+      if (state.inputLevel > .05) state.lastUserActivityAt = Date.now();
     } catch (_) { state.inputLevel = 0; state.outputLevel = 0; }
-    return {...state, callTranscript: state.callTranscript.map(entry => ({...entry})), availableMicrophones: state.availableMicrophones.map(device => ({...device}))};
+    return {...state, callTranscript: state.callTranscript.map(entry => ({...entry})),
+      availableMicrophones: state.availableMicrophones.map(device => ({...device})),
+      availableSpeakers: state.availableSpeakers.map(device => ({...device}))};
   }
-  async function refreshMicrophones() {
+  async function refreshAudioDevices() {
     // Enumeration never requests permission. Labels appear only after the
     // user's microphone permission, and are displayed locally, not uploaded.
     if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -100,8 +108,41 @@
       if (request !== epoch || state.realtimeStatus !== 'connected') return;
       state.availableMicrophones = devices.filter(device => device.kind === 'audioinput' && device.deviceId)
         .map((device, index) => ({id: device.deviceId, label: device.label || `Microphone ${index + 1}`}));
+      state.speakerSelectionSupported = typeof window.HTMLAudioElement?.prototype.setSinkId === 'function';
+      const outputs = state.speakerSelectionSupported
+        ? devices.filter(device => device.kind === 'audiooutput' && device.deviceId && device.deviceId !== 'default')
+          .map((device, index) => ({id: device.deviceId, label: device.label || `Speaker ${index + 1}`})) : [];
+      state.availableSpeakers = [{id: 'default', label: 'System default'}, ...outputs];
+      const selected = state.availableSpeakers.find(device => device.id === state.selectedSpeakerId);
+      state.speakerName = selected?.label || 'System default';
+      if (!selected && !state.changingSpeaker) {
+        await changeSpeaker('default');
+        if (request === epoch && !state.speakerIssue) state.speakerIssue = 'The selected speaker disconnected. Using the system default.';
+      }
       inspectMicrophone();
     } catch (_) { /* Some browsers cannot enumerate devices; default input still works. */ }
+  }
+  const refreshMicrophones = refreshAudioDevices;
+  async function changeSpeaker(deviceId) {
+    if (!session || state.realtimeStatus !== 'connected' || state.changingSpeaker) return;
+    if (typeof deviceId !== 'string' || !deviceId) return;
+    if (!state.speakerSelectionSupported) {
+      state.speakerIssue = 'This browser uses your system speaker. Change the output in your device sound settings.';
+      return;
+    }
+    const request = epoch, active = session;
+    state.changingSpeaker = true; state.speakerIssue = null;
+    try {
+      // The public SDK delegates this to HTMLAudioElement.setSinkId for WebRTC.
+      // Its fixed format/rate must not be supplied as device-change overrides.
+      await active.changeOutputDevice({outputDeviceId: deviceId});
+      if (cancelled(request)) return;
+      state.selectedSpeakerId = deviceId;
+      state.speakerName = state.availableSpeakers.find(device => device.id === deviceId)?.label || 'Selected speaker';
+      active.setVolume({volume: state.speakerMuted ? 0 : 1});
+    } catch (_) {
+      if (!cancelled(request)) state.speakerIssue = 'That speaker could not connect. Choose another output or check your device sound settings.';
+    } finally { if (!cancelled(request)) state.changingSpeaker = false; }
   }
   async function changeMicrophone(deviceId) {
     if (!session || state.realtimeStatus !== 'connected' || state.changingMicrophone) return;
@@ -140,6 +181,9 @@
     state.inputLevel = 0; state.outputLevel = 0; state.awaitingReply = false;
     microphoneSelectionError = null; state.microphoneIssue = null; state.microphoneName = null;
     state.selectedMicrophoneId = null; state.availableMicrophones = []; state.changingMicrophone = false;
+    state.availableSpeakers = []; state.selectedSpeakerId = 'default'; state.speakerName = 'System default';
+    state.speakerSelectionSupported = false; state.changingSpeaker = false; state.speakerIssue = null;
+    state.lastUserActivityAt = null;
     if (deviceChangeListener) navigator.mediaDevices?.removeEventListener?.('devicechange', deviceChangeListener);
     deviceChangeListener = null;
     state.realtimeConnectedAt = null;
@@ -156,7 +200,7 @@
     } else if (!pendingStart) restoreGuard(guard);
   }
   async function start(config) {
-    if (state.realtimeStatus === 'connected' || state.realtimeStatus === 'connecting') throw new Error('A call is already active.');
+    if (['loading', 'connecting', 'connected'].includes(state.realtimeStatus)) throw new Error('A call is already active.');
     if (pendingStart) throw new Error('The previous connection is still closing. Please try again shortly.');
     const request = ++epoch;
     state.voiceConversationId = null; state.callTranscript = [];
@@ -164,6 +208,7 @@
     state.realtimeStatus = 'loading';
     state.micMuted = false;
     state.speakerMuted = false; state.awaitingReply = false;
+    state.lastUserActivityAt = null;
     microphoneSelectionError = null; state.microphoneIssue = null; state.inputLevel = 0; state.outputLevel = 0;
     state.userCaption = null; state.agentCaption = null;
     try {
@@ -178,6 +223,9 @@
       const begin = window.ElevenLabsClient.Conversation.startSession({
         conversationToken: config.conversationToken,
         connectionType: 'webrtc',
+        // A pooled HTML audio element may retain the previous call's sink.
+        // Explicitly start each new call on the system default output.
+        outputDeviceId: 'default',
         // LiveKit 2.21 defaults to the newer single-PC negotiation, which can
         // fail before capture on WebKit with an unsupported setConfiguration.
         // Use the SDK's supported dual-PC compatibility path (ElevenLabs #960).
@@ -189,6 +237,15 @@
         onConversationCreated: value => {
           created = value;
           if (cancelled(request)) { value.setVolume({volume: 0}); value.setMicMuted(true); void Promise.resolve().then(() => value.endSession()).catch(() => {}); }
+          else value.setVolume({volume: state.speakerMuted ? 0 : 1});
+        },
+        onDebug: event => {
+          // LiveKit reuses detached audio elements across calls. Hangup mutes
+          // the old element to 0; SDK 1.28 does not reset that recycled volume.
+          // Reapply on late remote-track attachment as well as session creation.
+          if (!cancelled(request) && event?.type === 'audio_element_ready') {
+            (created || session)?.setVolume({volume: state.speakerMuted ? 0 : 1});
+          }
         },
         onConnect: ({conversationId}) => {
           if (cancelled(request)) return;
@@ -205,7 +262,7 @@
         onMessage: ({message, role, source}) => {
           if (cancelled(request) || typeof message !== 'string') return;
           const text = message.slice(0, 6000);
-          if (role === 'user' || source === 'user') { state.userCaption = text; state.awaitingReply = true; }
+          if (role === 'user' || source === 'user') { state.userCaption = text; state.awaitingReply = true; state.lastUserActivityAt = Date.now(); }
           else if (role === 'agent' || source === 'ai') { state.agentCaption = text; state.awaitingReply = false; }
           else return;
           const speaker = role === 'user' || source === 'user' ? 'user' : 'assistant';
@@ -215,7 +272,10 @@
             if (state.callTranscript.length > 500) state.callTranscript.shift();
           }
         },
-        onInterruption: () => { if (!cancelled(request)) state.callMode = 'listening'; },
+        onVadScore: ({vadScore}) => {
+          if (!cancelled(request) && !state.micMuted && vadScore > .5) state.lastUserActivityAt = Date.now();
+        },
+        onInterruption: () => { if (!cancelled(request)) { state.callMode = 'listening'; state.lastUserActivityAt = Date.now(); } },
         onAgentResponseCorrection: event => {
           if (!cancelled(request) && typeof event?.corrected_agent_response === 'string') {
             state.agentCaption = event.corrected_agent_response.slice(0, 6000);
@@ -243,13 +303,14 @@
           return;
         }
         session = connected;
+        connected.setVolume({volume: state.speakerMuted ? 0 : 1});
         state.realtimeStatus = 'connected';
         state.voiceConversationId = connected.getId();
         state.realtimeConnectedAt ??= Date.now();
         // Confirm the provider's actual audio capture, not merely its transport
         // connection. Never leave an apparently listening UI without an input.
         inspectMicrophone();
-        deviceChangeListener = () => { void refreshMicrophones(); };
+        deviceChangeListener = () => { void refreshAudioDevices(); };
         navigator.mediaDevices.addEventListener?.('devicechange', deviceChangeListener);
         await refreshMicrophones();
       } catch (error) {
@@ -295,5 +356,6 @@
     }
   }
   window.airaRealtime = Object.freeze({prepare, start, stop, mute, speakerMute, interrupt,
-    refreshMicrophones, changeMicrophone, clearTranscript, contextualUpdate, snapshot});
+    refreshMicrophones, refreshAudioDevices, changeMicrophone, changeSpeaker,
+    clearTranscript, contextualUpdate, snapshot});
 })();

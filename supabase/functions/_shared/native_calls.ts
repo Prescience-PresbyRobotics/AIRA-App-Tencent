@@ -217,7 +217,8 @@ export async function handleCallArchives(
   const id = uuid(match[1]);
   if (method === "DELETE") {
     await db.rpc("aira_delete_call_transcript", { p_user: user, p_call: id });
-    return { body: { deleted: true } };
+    const latest = await db.one("profiles", `id=eq.${user}&enabled=eq.true`);
+    return { body: { deleted: true, privacyVersion: latest?.consent_version } };
   }
   if (method === "GET") {
     // Recovery is bounded to one provider lookup, only for an owner's archive.
@@ -271,6 +272,17 @@ export async function handleCallArchives(
     if (!call) {
       throw new ApiError(404, "not_found", "This call is unavailable.");
     }
+    // These recent user captions are ephemeral evidence for owner-bound native
+    // save tools, including when durable archive storage is disabled.
+    await db.rpc("aira_update_call_context", {
+      p_user: user,
+      p_call: id,
+      p_version: profile.consent_version,
+      p_context: {
+        recentUserCaptions: entries.filter((entry) => entry.role === "user")
+          .slice(-20).map((entry) => entry.text.slice(0, 2000)),
+      },
+    });
     if (!profile.consents.conversation_storage) {
       return { body: { saved: false, reason: "storage_disabled" } };
     }

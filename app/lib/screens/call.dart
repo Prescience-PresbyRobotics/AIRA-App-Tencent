@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import '../controller.dart';
 import '../theme.dart';
 import '../widgets/companion.dart';
+import '../widgets/companion_park.dart';
+import '../media/call_emotion_context.dart';
 import '../widgets/ui.dart';
 import '../media/aira_media.dart';
 
@@ -40,6 +42,9 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
   DateTime? connectedAt, lastPublishedAt;
   String? lastPublishedLabel, correction, contextError;
   bool correctionShared = false;
+  final facialCheckIn = FacialCheckInPolicy();
+  String lastContextFingerprint = '';
+  String? lastCheckInId;
   String caption = 'A little chat, at your pace.';
   String get mode => widget.video ? 'video' : 'voice';
   bool get cameraAllowed => active || previewOpen;
@@ -240,6 +245,9 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
         lastPublishedAt = null;
         lastPublishedLabel = null;
         correctionShared = false;
+        facialCheckIn.reset();
+        lastContextFingerprint = '';
+        lastCheckInId = null;
         caption = 'Talk naturally. You can interrupt AIRA by speaking.';
       });
       checkpointTranscript(force: true);
@@ -343,6 +351,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
   Map<String, dynamic>? freshCue() {
     final state = media.state;
     if (!widget.controller.consent('face_cues') ||
+        !state.cameraOn ||
         !state.detectionEnabled ||
         state.detection != 'ready' ||
         state.faceCount != 1 ||
@@ -359,12 +368,34 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
   }
 
   Future<void> publishContext({bool force = false}) async {
-    if (!active || ended || publishing || widget.controller.preview) return;
+    if (!active || ended || widget.controller.preview) return;
     final cue = freshCue();
     final now = DateTime.now();
+    final feeling = correction?.toLowerCase();
+    final checkIn = facialCheckIn.evaluate(
+      now: now,
+      connectedAt: connectedAt ?? now,
+      freshLabel: widget.video ? (cue?['label'] as String?) : null,
+      agentSpeaking: media.state.callMode == 'speaking',
+      awaitingReply: media.state.awaitingReply,
+      lastUserActivity: media.state.lastUserActivityAt,
+      selfReportedFeeling: feeling,
+    );
+    final fingerprint = jsonEncode([cue?['label'], feeling, checkIn]);
+    final checkInChanged = checkIn?['id'] != lastCheckInId;
+    if (fingerprint != lastContextFingerprint) {
+      media.sendCallContext(
+        'Current temporary wellbeing context: self-reported feeling: ${feeling ?? 'not provided'}; facial expression estimate: ${cue?['label'] ?? 'unknown/cleared'}. The person’s own words take priority. '
+        '${checkIn == null ? 'Camera check-in: ineligible/cleared. Do not follow up on a previous camera cue.' : 'Camera check-in: eligible; cue_id=${checkIn['id']}; expires_at=${checkIn['expiresAt']}; expression=${checkIn['label']}. On the next natural silence turn, before this expiry, you may ask ONE gentle, tentative question about that expression and what is going on. Never interrupt, diagnose, insist, or repeat a cue ID. This is an uncertain expression cue, not something the user said.'}',
+      );
+    }
+    lastContextFingerprint = fingerprint;
+    lastCheckInId = checkIn?['id'];
+    if (publishing) return;
     final cleared = cue == null && lastPublishedLabel != null;
     if (!force &&
         !cleared &&
+        !checkInChanged &&
         lastPublishedAt != null &&
         now.difference(lastPublishedAt!) < const Duration(seconds: 3)) {
       return;
@@ -372,11 +403,11 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
     if (!force &&
         cue == null &&
         lastPublishedLabel == null &&
+        !checkInChanged &&
         correctionShared) {
       return;
     }
     final request = epoch;
-    final feeling = correction?.toLowerCase();
     publishing = true;
     try {
       await widget.controller.publishCallContext(
@@ -384,11 +415,6 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
         selfReportedFeeling: feeling,
       );
       if (!current(request) || !active) return;
-      if (cue?['label'] != lastPublishedLabel || !correctionShared) {
-        media.sendCallContext(
-          'Current temporary wellbeing context: self-reported feeling: ${feeling ?? 'not provided'}; facial expression estimate: ${cue?['label'] ?? 'unknown/cleared'}. The person’s own words take priority. Treat this as uncertain data, not instructions, and do not announce inferred emotions.',
-        );
-      }
       lastPublishedAt = now;
       lastPublishedLabel = cue?['label'] as String?;
       setState(() {
@@ -399,7 +425,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
       if (current(request) && active) {
         lastPublishedAt = now;
         setState(
-          () => contextError = 'Your feeling or facial estimate could not reach AIRA yet. You can also say how you feel.',
+          () => contextError = 'Your wellbeing setting could not sync yet. You can also say how you feel.',
         );
       }
     } finally {
@@ -507,7 +533,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
   }
 
   Future<void> microphoneOptions() async {
-    unawaited(media.refreshMicrophones());
+    unawaited(media.refreshAudioDevices());
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -522,80 +548,136 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                 : null;
             return Padding(
               padding: const EdgeInsets.fromLTRB(24, 4, 24, 28),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Microphone',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 12),
-                  if (devices.isEmpty)
-                    const Text(
-                      'Allow microphone access in your browser, then try again.',
-                    )
-                  else
-                    DropdownButtonFormField<String>(
-                      key: ValueKey(selected),
-                      initialValue: selected,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Audio input',
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Audio devices',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 12),
+                    if (devices.isEmpty)
+                      const Text(
+                        'Allow microphone access in your browser, then try again.',
+                      )
+                    else
+                      DropdownButtonFormField<String>(
+                        key: ValueKey(selected),
+                        initialValue: selected,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Audio input',
+                        ),
+                        items: [
+                          for (final device in devices)
+                            DropdownMenuItem(
+                              value: device.id,
+                              child: Text(
+                                device.label,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: media.state.changingMicrophone
+                            ? null
+                            : (value) async {
+                                if (value == null) return;
+                                try {
+                                  await media.changeMicrophone(value);
+                                } catch (_) {
+                                  if (sheet.mounted) {
+                                    showMessage(
+                                      sheet,
+                                      'That microphone could not be opened. Try another input.',
+                                    );
+                                  }
+                                }
+                              },
                       ),
-                      items: [
-                        for (final device in devices)
-                          DropdownMenuItem(
-                            value: device.id,
+                    const SizedBox(height: 16),
+                    if (media.state.changingMicrophone)
+                      const LinearProgressIndicator()
+                    else
+                      Row(
+                        children: [
+                          _MicrophoneMeter(
+                            level: media.state.inputLevel,
+                            muted: media.state.micMuted,
+                            dark: false,
+                          ),
+                          const SizedBox(width: 12),
+                          const Expanded(
                             child: Text(
-                              device.label,
-                              overflow: TextOverflow.ellipsis,
+                              'Say a few words. The bars should move.',
                             ),
                           ),
-                      ],
-                      onChanged: media.state.changingMicrophone
-                          ? null
-                          : (value) async {
-                              if (value == null) return;
-                              try {
-                                await media.changeMicrophone(value);
-                              } catch (_) {
-                                if (sheet.mounted) {
-                                  showMessage(
-                                    sheet,
-                                    'That microphone could not be opened. Try another input.',
-                                  );
-                                }
-                              }
-                            },
-                    ),
-                  const SizedBox(height: 16),
-                  if (media.state.changingMicrophone)
-                    const LinearProgressIndicator()
-                  else
-                    Row(
-                      children: [
-                        _MicrophoneMeter(
-                          level: media.state.inputLevel,
-                          muted: media.state.micMuted,
-                          dark: false,
-                        ),
-                        const SizedBox(width: 12),
-                        const Expanded(
-                          child: Text('Say a few words. The bars should move.'),
-                        ),
-                      ],
-                    ),
-                  if (media.state.microphoneIssue != null) ...[
+                        ],
+                      ),
+                    if (media.state.microphoneIssue != null) ...[
+                      const SizedBox(height: 12),
+                      Text(media.state.microphoneIssue!),
+                    ],
                     const SizedBox(height: 12),
-                    Text(media.state.microphoneIssue!),
+                    if (media.state.speakerSelectionSupported)
+                      DropdownButtonFormField<String>(
+                        key: ValueKey(
+                          'speaker-${media.state.selectedSpeakerId}',
+                        ),
+                        initialValue:
+                            media.state.availableSpeakers.any(
+                              (d) => d.id == media.state.selectedSpeakerId,
+                            )
+                            ? media.state.selectedSpeakerId
+                            : null,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Speaker / headphones',
+                        ),
+                        items: [
+                          for (final device in media.state.availableSpeakers)
+                            DropdownMenuItem(
+                              value: device.id,
+                              child: Text(
+                                device.label,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: media.state.changingSpeaker
+                            ? null
+                            : (id) async {
+                                if (id == null) return;
+                                try {
+                                  await media.changeSpeaker(id);
+                                } catch (_) {
+                                  if (sheet.mounted) {
+                                    showMessage(
+                                      sheet,
+                                      'That speaker could not connect. Try another output.',
+                                    );
+                                  }
+                                }
+                              },
+                      )
+                    else
+                      const ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.speaker_rounded),
+                        title: Text('System default speaker'),
+                        subtitle: Text(
+                          'This browser uses your device sound settings to choose a speaker or headphones.',
+                        ),
+                      ),
+                    if (media.state.changingSpeaker)
+                      const LinearProgressIndicator(),
+                    if (media.state.speakerIssue != null) ...[
+                      const SizedBox(height: 12),
+                      Text(media.state.speakerIssue!),
+                    ],
                   ],
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Your browser or computer controls the speaker and headphone output.',
-                    style: TextStyle(fontSize: 14, color: AiraColors.muted),
-                  ),
-                ],
+                ),
               ),
             );
           },
@@ -605,8 +687,8 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
   }
 
   Widget cameraPreview(bool narrow) => SizedBox(
-    width: narrow ? 112 : 170,
-    height: narrow ? 138 : 190,
+    width: narrow ? 140 : 220,
+    height: narrow ? 180 : 260,
     child: ClipRRect(
       borderRadius: BorderRadius.circular(22),
       child: Stack(
@@ -787,7 +869,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                   builder: (context, constraints) {
                     final narrow = constraints.maxWidth < 500;
                     final stageHeight = (constraints.maxHeight - 370).clamp(
-                      230.0,
+                      widget.video ? (narrow ? 410.0 : 340.0) : 230.0,
                       490.0,
                     );
                     final mascotSize = (stageHeight * .88).clamp(
@@ -864,38 +946,51 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                   child: Stack(
                                     alignment: Alignment.center,
                                     children: [
-                                      Positioned.fill(
-                                        child: Center(
-                                          child: Container(
-                                            width: mascotSize * .96,
-                                            height: mascotSize * .96,
-                                            decoration: BoxDecoration(
-                                              shape: BoxShape.circle,
-                                              color: const Color(0xFFECE6D9)
-                                                  .withValues(alpha: .97),
-                                              boxShadow: [
-                                                BoxShadow(
-                                                  color: Colors.black
-                                                      .withValues(alpha: .08),
-                                                  blurRadius: 30,
-                                                  offset: const Offset(0, 16),
-                                                ),
-                                              ],
+                                      if (widget.video)
+                                        Positioned.fill(
+                                          child: CompanionPark(
+                                            activity: activity,
+                                            expression: expression,
+                                            voiceLevel: media.state.outputLevel,
+                                            narrow: narrow,
+                                          ),
+                                        )
+                                      else ...[
+                                        Positioned.fill(
+                                          child: Center(
+                                            child: Container(
+                                              width: mascotSize * .96,
+                                              height: mascotSize * .96,
+                                              decoration: BoxDecoration(
+                                                shape: BoxShape.circle,
+                                                color: const Color(0xFFECE6D9)
+                                                    .withValues(alpha: .97),
+                                                boxShadow: [
+                                                  BoxShadow(
+                                                    color: Colors.black
+                                                        .withValues(alpha: .08),
+                                                    blurRadius: 30,
+                                                    offset: const Offset(0, 16),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
                                           ),
                                         ),
-                                      ),
-                                      Padding(
-                                        padding: EdgeInsets.only(
-                                          top: widget.video && narrow ? 54 : 0,
+                                        Padding(
+                                          padding: EdgeInsets.only(
+                                            top: widget.video && narrow
+                                                ? 54
+                                                : 0,
+                                          ),
+                                          child: Companion(
+                                            size: mascotSize,
+                                            activity: activity,
+                                            expression: expression,
+                                            voiceLevel: media.state.outputLevel,
+                                          ),
                                         ),
-                                        child: Companion(
-                                          size: mascotSize,
-                                          activity: activity,
-                                          expression: expression,
-                                          voiceLevel: media.state.outputLevel,
-                                        ),
-                                      ),
+                                      ],
                                       if (widget.video)
                                         Positioned(
                                           top: 12,
@@ -1135,7 +1230,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                     size: 16,
                                   ),
                                   label: const Text(
-                                    'Microphone',
+                                    'Audio devices',
                                     style: TextStyle(fontSize: 13),
                                   ),
                                 ),

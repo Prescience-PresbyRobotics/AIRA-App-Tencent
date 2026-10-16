@@ -36,6 +36,14 @@ class ChatApi extends AiraApi {
       replies.add(result);
       return result.future;
     }
+    if (method == 'GET' && path == '/calls/history') return {'calls': []};
+    if (method == 'GET' && path == '/calls/call-one/transcript') {
+      return {
+        'messages': [
+          {'role': 'user', 'text': 'Spoken garden detail'},
+        ],
+      };
+    }
     if (method == 'PATCH' && path == '/preferences') {
       return {
         'profile': {'consent_version': 2},
@@ -211,6 +219,75 @@ void main() {
       expect(controller.messages.first.time, original.time);
       expect(find.text('Read'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'call cards appear in the chat without exposing transcript bubbles',
+    (tester) async {
+      controller.preferences['store_conversations'] = true;
+      final start = DateTime.now().subtract(const Duration(minutes: 5));
+      controller.messages = [
+        ChatTurn(
+          text: 'A text before the call',
+          fromAira: false,
+          time: start.subtract(const Duration(minutes: 1)),
+        ),
+      ];
+      controller.callHistory = [
+        {
+          'id': 'call-one',
+          'mode': 'video',
+          'initiator': 'user',
+          'startedAt': start.toIso8601String(),
+          'endedAt': start.add(const Duration(minutes: 2)).toIso8601String(),
+          'status': 'ended',
+        },
+      ];
+      await showChat(tester, controller);
+      await tester.pumpAndSettle();
+      final card = find.byKey(const ValueKey('call-card-call-one'));
+      expect(card, findsOneWidget);
+      expect(find.textContaining('2 min'), findsOneWidget);
+      expect(find.text('Spoken garden detail'), findsNothing);
+      expect(
+        tester.getTopLeft(card).dy,
+        greaterThan(tester.getTopLeft(find.text('A text before the call')).dy),
+      );
+      await tester.tap(card);
+      await tester.pumpAndSettle();
+      expect(find.text('Video call transcript'), findsOneWidget);
+      expect(find.text('Spoken garden detail'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'main chat omits read aloud and only shows confirmed action receipts',
+    (tester) async {
+      controller.messages = [
+        ChatTurn(
+          text: 'Your reminder is saved.',
+          fromAira: true,
+          speechToken: 'unused-playback-token',
+          actions: [
+            {
+              'kind': 'medication',
+              'id': 'medicine',
+              'label': 'Morning tablet',
+              'status': 'saved',
+            },
+            {'kind': 'memory', 'label': 'Not confirmed', 'status': 'failed'},
+          ],
+        ),
+      ];
+      await showChat(tester, controller);
+      await tester.pumpAndSettle();
+      expect(find.text('Read aloud'), findsNothing);
+      expect(
+        find.text('Medicine reminder saved · Morning tablet'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Not confirmed'), findsNothing);
     },
   );
 

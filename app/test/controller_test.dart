@@ -228,6 +228,33 @@ void main() {
     },
   );
 
+  test('logout closes the active call and clears local state without waiting on the network', () async {
+    final closed = Completer<Map<String, dynamic>>();
+    api.respond = (_) => closed.future;
+    controller.activeCallId = 'call-to-close';
+    controller.callHistory = [
+      {'id': 'private-call'},
+    ];
+    controller.callSchedule = {'localTime': '09:00'};
+    final result = controller.signOut();
+    expect(controller.activeCallId, isEmpty);
+    expect(controller.callHistory, isEmpty);
+    expect(controller.callSchedule, isNull);
+    expect(api.calls.single.path, '/calls/call-to-close/end');
+    closed.completeError(const AiraException('Offline'));
+    await result;
+    expect(controller.signedIn, isFalse);
+  });
+
+  test('disabled Google provider has a useful email fallback message', () {
+    expect(
+      AiraController.cleanError(
+        const AuthException('Unsupported provider: provider is not enabled'),
+      ),
+      'Google sign-in is not available yet. Please use email to sign in for now.',
+    );
+  });
+
   test(
     'sign-out account boundary rejects a delayed prior-account response',
     () async {
@@ -683,33 +710,26 @@ void main() {
       expect(controller.outbox, isEmpty);
     },
   );
-  test(
-    'main chat and model context exclude voice and video transcripts',
-    () async {
-      controller.messages = [
-        ChatTurn(text: 'Text message', fromAira: false),
-        ChatTurn(
-          text: 'Private spoken message',
-          fromAira: false,
-          mode: 'voice',
-        ),
-        ChatTurn(text: 'Video reply', fromAira: true, mode: 'video'),
-      ];
-      expect(controller.visibleMessages.map((turn) => turn.text), [
-        'Text message',
-      ]);
-      api.respond = (_) async => approvedReply('Text reply');
-      await controller.send('New text');
-      expect(api.calls.last.data!['context'], [
-        {'role': 'user', 'text': 'Text message'},
-      ]);
-      expect(controller.visibleMessages.map((turn) => turn.text), [
-        'Text message',
-        'New text',
-        'Text reply',
-      ]);
-    },
-  );
+  test('main chat and client payload omit transcript bubbles; shared context is server-owned', () async {
+    controller.messages = [
+      ChatTurn(text: 'Text message', fromAira: false),
+      ChatTurn(text: 'Private spoken message', fromAira: false, mode: 'voice'),
+      ChatTurn(text: 'Video reply', fromAira: true, mode: 'video'),
+    ];
+    expect(controller.visibleMessages.map((turn) => turn.text), [
+      'Text message',
+    ]);
+    api.respond = (_) async => approvedReply('Text reply');
+    await controller.send('New text');
+    expect(api.calls.last.data!['context'], [
+      {'role': 'user', 'text': 'Text message'},
+    ]);
+    expect(controller.visibleMessages.map((turn) => turn.text), [
+      'Text message',
+      'New text',
+      'Text reply',
+    ]);
+  });
 
   test(
     'call archive pagination stays separate and clears with storage opt-out',
@@ -778,6 +798,120 @@ void main() {
       expect(api.calls, isEmpty);
     },
   );
+
+  test(
+    'medicine create and edit accept future dates and carry version protection',
+    () async {
+      controller.preferences['medication_reminders'] = true;
+      final future = DateTime.now().toUtc().add(const Duration(days: 7));
+      api.respond = (_) async => {};
+      await controller.saveMedicine(
+        'Existing tablet',
+        'Usual instructions',
+        const TimeOfDay(hour: 9, minute: 0),
+        dueAt: future,
+        recurrence: 'daily',
+      );
+      expect(api.calls.single.path, '/medications');
+      expect(api.calls.single.data!['dueAt'], future.toIso8601String());
+      expect(api.calls.single.data!['recurrence'], 'daily');
+      await controller.saveMedicine(
+        'Existing tablet',
+        'Updated reminder note',
+        const TimeOfDay(hour: 10, minute: 0),
+        dueAt: future,
+        existing: {'id': 'medicine-one', 'version': 4},
+      );
+      expect(api.calls.last.method, 'PATCH');
+      expect(api.calls.last.path, '/medications/medicine-one');
+      expect(api.calls.last.data!['expectedVersion'], 4);
+      expect(api.calls.last.data!['recurrence'], 'once');
+      await expectLater(
+        controller.saveMedicine(
+          'Tablet',
+          '',
+          const TimeOfDay(hour: 9, minute: 0),
+          dueAt: DateTime.now().subtract(const Duration(minutes: 1)),
+        ),
+        throwsA(isA<AiraException>()),
+      );
+      expect(api.calls, hasLength(2));
+    },
+  );
+
+  test(
+    'deleting a call revokes shared context but retains other visible history',
+    () async {
+      controller.privacyVersion = 2;
+      controller.messages = [
+        ChatTurn(text: 'Earlier text', fromAira: false, contextVersion: 2),
+      ];
+      controller.callHistory = [
+        {'id': 'removed'},
+        {'id': 'kept'},
+      ];
+      controller.pendingRequest = 'old-request';
+      controller.pendingText = 'old text';
+      api.respond = (_) async => {'deleted': true, 'privacyVersion': 3};
+      await controller.deleteCallTranscript('removed');
+      expect(controller.privacyVersion, 3);
+      expect(controller.messages.single.text, 'Earlier text');
+      expect(controller.callHistory.single['id'], 'kept');
+      expect(controller.pendingRequest, isNull);
+      expect(controller.pendingText, isNull);
+    },
+  );
+
+  test(
+    'automatic action receipts attach to reply only after server success',
+    () async {
+      api.respond = (_) async => {
+        ...approvedReply('I saved that for you.'),
+        'actions': [
+          {
+            'kind': 'memory',
+            'id': 'memory-one',
+            'label': 'Gardening',
+            'status': 'saved',
+          },
+        ],
+        'actionNotice': 'You can review this in About me.',
+      };
+      final result = await controller.send('I enjoy gardening');
+      expect(result.actions.single['id'], 'memory-one');
+      expect(result.actionNotice, 'You can review this in About me.');
+      expect(controller.messages.last.actions.single['status'], 'saved');
+    },
+  );
+
+  test('refreshing recent calls preserves earlier loaded call cards', () async {
+    controller.preferences['store_conversations'] = true;
+    var refreshed = false;
+    api.respond = (request) async => {
+      'calls': [
+        {
+          'id': request.path.contains('?')
+              ? 'older'
+              : refreshed
+              ? 'new'
+              : 'latest',
+          'mode': 'voice',
+        },
+      ],
+      'nextCursor': request.path.contains('?') ? null : 'previous',
+      'privacyVersion': 1,
+    };
+    await controller.refreshCallHistory();
+    await controller.refreshCallHistory(older: true);
+    refreshed = true;
+    await controller.refreshCallHistory();
+    expect(controller.callHistory.map((call) => call['id']), [
+      'latest',
+      'older',
+      'new',
+    ]);
+    expect(controller.callHistoryCursor, isNull);
+  });
 
   test('scheduled call accept is claimed before native call start', () async {
     api.respond = (request) async {

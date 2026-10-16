@@ -1,4 +1,5 @@
 import 'package:aira/controller.dart';
+import 'package:aira/main.dart';
 import 'package:aira/screens/personal.dart';
 import 'package:aira/screens/auth.dart';
 import 'package:aira/screens/settings.dart';
@@ -110,6 +111,57 @@ void main() {
   });
 
   testWidgets(
+    'medicine reminders can be edited and keep a future date beyond tomorrow',
+    (tester) async {
+      final controller = AiraController(null)..startPreview();
+      addTearDown(controller.dispose);
+      final due = DateTime.now().toUtc().add(const Duration(days: 10));
+      controller.medications = [
+        {
+          'id': 'existing',
+          'label': 'Morning tablet',
+          'instructions': 'Existing directions',
+          'due_at': due.toIso8601String(),
+          'recurrence': 'once',
+          'version': 3,
+        },
+      ];
+      await tester.pumpWidget(
+        screen(controller, PersonalScreen(controller: controller)),
+      );
+      await tester.ensureVisible(find.text('Medicine reminders'));
+      await tester.tap(find.text('Medicine reminders'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Edit Morning tablet'));
+      await tester.pumpAndSettle();
+      expect(find.text('Edit medicine reminder'), findsOneWidget);
+      expect(find.text('Morning tablet'), findsWidgets);
+      expect(find.textContaining('next 24 hours'), findsNothing);
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Existing directions'),
+        'Updated note',
+      );
+      tester.testTextInput.hide();
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Repeat daily'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Repeat daily'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Save changes'));
+      await tester.tap(find.text('Save changes'));
+      await tester.pumpAndSettle();
+      expect(controller.medications, hasLength(1));
+      expect(controller.medications.single['instructions'], 'Updated note');
+      expect(controller.medications.single['version'], 4);
+      expect(controller.medications.single['recurrence'], 'daily');
+      final saved = DateTime.parse(
+        controller.medications.single['due_at'].toString(),
+      );
+      expect(saved.difference(due).inMinutes.abs(), lessThan(1));
+    },
+  );
+
+  testWidgets(
     'Settings overview is short and privacy choices remain explicit',
     (tester) async {
       final controller = AiraController(null)..startPreview();
@@ -173,6 +225,48 @@ void main() {
       await tester.pumpAndSettle();
       expect(controller.largerText, isTrue);
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'Settings exposes logout and Exit preview clears all local account data',
+    (tester) async {
+      final controller = AiraController(null)..startPreview();
+      addTearDown(controller.dispose);
+      controller.onboarded = true;
+      controller.name = 'Private preview name';
+      controller.messages = [
+        ChatTurn(text: 'Private message', fromAira: false),
+      ];
+      controller.memories = [
+        {'id': 'memory', 'text': 'Private memory'},
+      ];
+      controller.callHistory = [
+        {'id': 'call', 'mode': 'voice'},
+      ];
+      controller.callSchedule = {'localTime': '09:00'};
+      controller.incomingCall = {'id': 'ring'};
+      controller.activeCallId = 'active-call';
+      controller.tab = 2;
+      await tester.pumpWidget(AiraApp(controller: controller));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('settings-logout')), findsOneWidget);
+      expect(find.text('Exit preview'), findsOneWidget);
+      final epoch = controller.sessionEpoch;
+      await tester.tap(find.byKey(const ValueKey('settings-logout')));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(AuthScreen), findsOneWidget);
+      expect(controller.sessionEpoch, greaterThan(epoch));
+      expect(controller.signedIn, isFalse);
+      expect(controller.messages, isEmpty);
+      expect(controller.memories, isEmpty);
+      expect(controller.callHistory, isEmpty);
+      expect(controller.activeCallId, isEmpty);
+      expect(controller.callSchedule, isNull);
+      expect(controller.incomingCall, isNull);
+      expect(controller.name, isEmpty);
+      expect(controller.preferences, isEmpty);
+      await tester.pumpWidget(const SizedBox());
     },
   );
 

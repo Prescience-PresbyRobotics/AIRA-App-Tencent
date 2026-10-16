@@ -2,11 +2,11 @@
 
 Canonical Supabase project: `yzcnccjlwgrkxokgjtkv`. Firebase: `aira-app-tencent`, hosted at [aira-app-tencent.web.app](https://aira-app-tencent.web.app). Never use the separate aira-mobile-app projects.
 
-Current migrations are core `202610140001`, live sessions `202610160001`, durable/pending text history `202610160002`–`003`, native call archives `202610160004`, scheduled incoming calls `202610160005`, and new-account feature defaults `202610160006`. All app data is protected by owner/role checks and RLS. `aira-api` is the authenticated app API; `aira-worker` handles due database work and bounded transcript recovery. `aira-realtime` is retired and returns 410 for stale custom-LLM clients.
+Current migrations are core `202610140001`, live sessions `202610160001`, durable/pending text history `202610160002`–`003`, native call archives `202610160004`, scheduled incoming calls `202610160005`, new-account feature defaults `202610160006`, and shared conversation context/actions with durable notes/reminders `202610160007`, and display-only preference context preservation `202610160008`. All app data is protected by owner/role checks and RLS. `aira-api` is the authenticated app API; `aira-worker` handles due database work and bounded transcript recovery. `aira-realtime` is retired and returns 410 for stale custom-LLM clients.
 
-Main text chat uses OpenAI Responses with `gpt-4.1-mini` and buffered safety screening. Live calls use a native **ElevenLabs Agent**, with `deepseek-v41-flash` selected inside ElevenLabs, Scribe Realtime and Jessica/Flash v2. Calls never forward to AIRA's OpenAI endpoint; the native agent prompt/provider behavior replaces the text route's pre-release classifier for calls. Thinking filler is disabled. Separate approved-text playback retains voice `La9lzDJ3mmfNhhQA06WM`, `eleven_multilingual_v2`, and bounded `scribe_v2` transcription.
+Main text chat uses OpenAI Responses with `gpt-4.1-mini` and buffered safety screening. Live calls use a native **ElevenLabs Agent**, with `deepseek-v41-flash` selected inside ElevenLabs, Scribe Realtime and the user-selected kid voice `La9lzDJ3mmfNhhQA06WM`/Flash v2. Calls never forward to AIRA's OpenAI endpoint; the native agent prompt/provider behavior replaces the text route's pre-release classifier for calls. Thinking filler is disabled. Separate approved-text playback retains voice `La9lzDJ3mmfNhhQA06WM`, `eleven_multilingual_v2`, and bounded `scribe_v2` transcription.
 
-Email verification stays enabled by the user's 16 October instruction and is reported working by the user. Only Forgot password is hidden. New passwords require 10 characters. Google OAuth and independent email-delivery testing remain incomplete. Auth redirects/CORS allow the exact local and correct Firebase origins. There is no external caregiver messaging adapter.
+Email verification stays enabled by the user's 16 October instruction and is reported working by the user. Only Forgot password is hidden. New passwords require 10 characters. Google OAuth is configured and public settings plus hosted/localhost redirects to Google were verified. A real account callback and independent email-delivery testing remain separate acceptance checks. Auth redirects/CORS allow the exact local and correct Firebase origins. There is no external caregiver messaging adapter.
 
 Historical hosted checks verified password Auth, CORS, authorization denial, worker execution and the earlier provider paths. New source behavior and current live checks must be reported separately; physical microphone/phone acceptance is not established by generated audio.
 
@@ -14,25 +14,28 @@ The backend accepts Supabase's injected modern `SUPABASE_SECRET_KEYS` dictionary
 
 ## What is implemented
 
-- Supabase Auth identity is checked server-side for every API request.
+- Supabase Auth identity is checked server-side for app API requests; the native agent action webhook instead requires the live server-issued call binding and current owner/consent version.
   Email/password and Google sign-in are configured through Supabase, not a
   parallel password database.
 - Owner-scoped database reads, denied direct writes, server-managed staff
   assignments, verified caregiver links, audited protected dashboard access.
   User-editable Auth metadata never grants a role.
-- Reviewable feature choices, confirmed memories, one-time medication/plan reminders,
+- Reviewable feature choices, automatically saved user-stated memories/plans, once/daily medication reminders,
   a separately chosen daily companion-call schedule, explicit acceptance/decline,
   medication Taken/Skip/Snooze self-reports and durable saved text/call archives.
   New profiles default all eleven feature flags on; existing choices stay unchanged.
-  Other prototype categories retain their separate 24-hour expiry.
+  Memories and reminder definitions persist until removal/feature opt-out. Other prototype categories retain their separate expiry.
 - OpenAI Responses requests with an explicit environment-selected model and
   `store:false`. Replies are buffered and screened using strict structured
   output before release. Invalid/unavailable screening substitutes fixed support
   copy; unchecked replies are not displayed or spoken.
 - A private native ElevenLabs agent and short-lived WebRTC connection tokens. The
   server reserves owner-bound calls and nonces; no custom LLM payload or OpenAI call
-  processing remains. Call transcripts are saved separately from the text thread,
+  processing remains. Full call transcripts are displayed separately from text bubbles,
   using validated provider transcripts with device captions as a labelled fallback.
+  Both text and calls retrieve owner-scoped, current-version shared context; the
+  native agent can search older saved context and save supported actions through a
+  bound Supabase webhook without invoking OpenAI.
   See the [live-call guide](../app/web/media/REALTIME-CALLS.md).
 - ElevenLabs bounded transcription and speech remain available. Speech requires a signed five-minute
   approved-reply token bound to account, request and current consent version.
@@ -43,6 +46,16 @@ The backend accepts Supabase's injected modern `SUPABASE_SECRET_KEYS` dictionary
 - Optional dated seven-day loneliness question (0–7 or Skip), separate
   self-reported feelings, and the same descriptive insights response for
   permitted owners/caregivers/admins.
+
+## Confirmed Google sign-in configuration
+
+On 16 October 2026, the authorized Firebase CLI provisioned Google Sign-In for project `aira-app-tencent`, brand **AIRA**, support **hi@helloaira.ai**, with `https://yzcnccjlwgrkxokgjtkv.supabase.co/auth/v1/callback` as an authorized redirect. It created the project's first web app, `1:597776068830:web:50467396ac1fd5e7c3924f` (`Default Web App`). This provisioning supplies the Google OAuth client; AIRA continues to use Supabase Auth and has no Firebase user migration.
+
+The generated OAuth client was retrieved through Google's official Identity Toolkit configuration API and transferred directly in process memory to the Supabase Management API fields `external_google_enabled`, `external_google_client_id` and `external_google_secret`. Other auth settings were preserved. No OAuth client secret, personal access token or Firebase credential was printed or saved into the repository.
+
+Verified after propagation: `/auth/v1/settings` reports Google enabled; `/auth/v1/authorize?provider=google` with both the hosted and localhost redirect returns 302 to `accounts.google.com` with the expected Supabase callback; Google redirects to its sign-in identifier screen without an OAuth configuration error. No real user account was signed in during verification. The end-user Google callback/session flow remains a separate acceptance check.
+
+For a new environment, the official [Firebase authentication CLI guide](https://firebase.google.com/docs/auth/configure-providers-cli) describes a temporary `firebase.json` `auth.providers.googleSignIn` configuration (`oAuthBrandDisplayName`, `supportEmail`, `authorizedRedirectUris`) and `firebase deploy --only auth --project PROJECT_ID`. Enable only the required Google provider. Follow the [Supabase Google guide](https://supabase.com/docs/guides/auth/social-login/auth-google) to save its OAuth client server-side. Do not broadly push a replacement Supabase auth configuration or expose client secrets in command arguments/logs.
 
 ## Set up another environment
 
@@ -129,14 +142,14 @@ application-level deletion.
 
 ## Native ElevenLabs voice setup
 
-Flutter uses the locally bundled `@elevenlabs/client` **1.28.0** browser SDK, with `webRtc.singlePeerConnection=false` for the reproduced WebKit negotiation issue. The provider runs the entire live conversation in its native Agents service. The source of the interaction prompt/configuration is [`functions/_shared/voice_agent.ts`](functions/_shared/voice_agent.ts): `deepseek-v41-flash`, Jessica (`cgSgspJ2msm6clMCkdW9`), Scribe Realtime, `eleven_flash_v2`, normal turn-taking, 900-second cap and a dynamic first greeting. The soft-timeout thinking cue is disabled (`timeout_seconds:-1`) and the prompt also forbids repeated thinking filler. Backup LLM selection is disabled; `custom_llm` is null.
+Flutter uses the locally bundled `@elevenlabs/client` **1.28.0** browser SDK, with `webRtc.singlePeerConnection=false` for the reproduced WebKit negotiation issue. The provider runs the entire live conversation in its native Agents service. The source of the interaction prompt/configuration is [`functions/_shared/voice_agent.ts`](functions/_shared/voice_agent.ts): `deepseek-v41-flash`, the requested kid voice (`La9lzDJ3mmfNhhQA06WM`), Scribe Realtime, `eleven_flash_v2`, normal turn-taking, 900-second cap and a dynamic first greeting. The soft-timeout thinking cue is disabled (`timeout_seconds:-1`) and the prompt also forbids repeated thinking filler. Backup LLM selection is disabled; `custom_llm` is null.
 
 Apply all migrations and deploy the app/worker functions. Live calls require server-side `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID`. Agent setup also uses `ELEVENLABS_REALTIME_VOICE_ID`; ordinary playback uses its separate `ELEVENLABS_VOICE_ID`. OpenAI remains necessary for text chat only. Old `AIRA_CALL_SIGNING_SECRET` / `AIRA_REALTIME_BRIDGE_SECRET` values are not required by native calls; remove obsolete provider custom-LLM configuration during migration. Deploy the retired `aira-realtime` response when replacing an existing environment so old clients cannot continue using its OpenAI bridge.
 
 `aira-voice-setup` is a temporary infrastructure helper:
 
 1. Deploy it explicitly after configuring the existing `AIRA_WORKER_SECRET` and ElevenLabs key/voice secrets.
-2. POST `{"action":"configure-native"}` with `x-aira-worker-secret` supplied securely in process memory. The helper updates `ELEVENLABS_AGENT_ID` if present, otherwise creates an agent. Save a newly returned ID in Edge Function secrets.
+2. POST `{"action":"configure-native"}` with `x-aira-worker-secret` supplied securely in process memory. The helper creates or updates the `aira_conversation_actions` webhook tool and attaches it to the agent. It updates the configured agent when `ELEVENLABS_AGENT_ID` is present, otherwise creates one. Save a newly returned ID in Edge Function secrets.
 3. POST `{"action":"inspect"}` to read back sanitized model, voice, auth, fallback, first-message and privacy settings. Confirm the native model, `hasCustomLlm:false`, authentication on and thinking timeout disabled. No API keys are returned.
 4. Remove the helper deployment with `supabase functions delete aira-voice-setup --project-ref YOUR_PROJECT_REF`. The checked-in helper source remains available for future deliberate updates.
 
@@ -144,7 +157,7 @@ Do not place the worker key in browser code, logs, command history or Git. The p
 
 The requested provider privacy configuration is `record_voice:false`, `retention_days:0`, `delete_transcript_and_pii:true`, `delete_audio:true`, `zero_retention_mode:false`. This requests scheduled deletion, not instant deletion or zero logging. The archive worker attempts to recover a completed transcript before provider deletion; device captions are a labelled fallback if the provider copy is unavailable. Verify actual provider account policy and deletion behavior independently. [ElevenLabs retention guidance](https://elevenlabs.io/docs/eleven-agents/customization/privacy/retention).
 
-The call starts only after an outgoing-call action or acceptance of a scheduled incoming invitation. Flutter receives a short-lived conversation token and dynamic variables for the preferred name, greeting, call ID and random binding nonce. The provider's stored initiation data must match the configured agent, call ID and nonce before canonical transcript text is accepted. Call identifiers alone never authorize access to another person's transcript.
+The call starts only after an outgoing-call action or acceptance of a scheduled incoming invitation. Flutter receives a short-lived conversation token and dynamic variables for the preferred name, greeting, call ID, random binding nonce, current timestamp/timezone and a bounded shared-context snapshot. The provider's stored initiation data must match the configured agent, call ID and nonce before canonical transcript text is accepted. Call identifiers alone never authorize access to another person's transcript.
 
 End stops local media immediately and closes server state. SDK captions are persisted under the owner while conversation saving remains enabled. A bounded worker later fetches at most five completed-call transcripts concurrently, retries at most ten times, and retires stale consent versions without recreating deleted rows. Individual transcript deletion, storage opt-out and account-data deletion prevent late recovery from restoring removed content.
 
@@ -208,7 +221,7 @@ wrapper/ID fields below are camelCase.
 | `PATCH /v1/preferences`                          | Profile: `display_name`, `timezone`, `text_scale` (1–2), `reduced_motion`, `onboarded`, `locale:'en'`. Consent choices can use canonical `consents:{...}` or flat Flutter aliases below. Returns updated `{profile,preferences}`.                                                                                                            |
 | `GET /v1/history?before=<cursor>` | Owner-only saved text-chat messages, oldest-to-newest within each 50-message page; excludes voice/video. Returns `{messages,nextCursor,conversationId,privacyVersion}`; omit `before` for the latest page. |
 | `DELETE /v1/history` | Deletes owned text-chat history and invalidates old context versions; returns `{deleted,privacyVersion}`. Call archives, memories and reminder controls remain separate. |
-| `POST /v1/messages`                              | `{clientMessageId,text,mode,conversationId?,contextVersion?,context?:[{role,text}],introductionShown?,cueSummary?:{label,observedAt},selfReportedFeeling?}`. Returns `{conversationId,messageId,text,status,speechToken,privacyVersion,provider}`. Text mode only: max 2,000 characters, 10 submissions/minute and 20/hour/account; call turns do not consume these counters. Failed logical requests can retry with the same ID and a refreshed processing deadline. `status` is approved/support/safe_fallback. |
+| `POST /v1/messages`                              | `{clientMessageId,text,mode,conversationId?,contextVersion?,context?:[{role,text}],introductionShown?,cueSummary?:{label,observedAt},selfReportedFeeling?}`. Returns `{conversationId,messageId,text,status,speechToken,privacyVersion,provider,actions,actionNotice}`. Text mode only: max 2,000 characters, 10 submissions/minute and 20/hour/account; call turns do not consume these counters. Failed logical requests can retry with the same ID and a refreshed processing deadline. `status` is approved/support/safe_fallback. |
 | `GET /v1/messages/:clientMessageId/status` | Owner-scoped acknowledgement: `{status:'processing' or 'completed' or 'failed' or 'not_found',createdAt?}`. Delivered requires a server record; Read means an actual Aira reply returned, not human attention. |
 | `POST /v1/audio/transcriptions`                  | `{audioBase64,mimeType,locale:'en'}` → `{text,editable:true,provider:'elevenlabs'}`. Max 5,000,000 decoded bytes; base MIME supports webm/mp4/wav/ogg/mpeg, with codec suffixes normalized.                                                                                                                                                  |
 | `POST /v1/speech`                                | `{speechToken}` → `{audioBase64,mimeType:'audio/mpeg',provider:'elevenlabs'}`. Speech/transcription share a 40-request/hour/account limit.                                                                                                                                                                                                   |
@@ -216,19 +229,20 @@ wrapper/ID fields below are camelCase.
 | `POST /v1/memories`                              | `{text,category?,confirmed:true}` → `{memory}`. Categories preference/relationship/plan/other.                                                                                                                                                                                                                                               |
 | `PATCH /v1/memories/:id`                         | `{text,expectedVersion}` → `{saved,privacyVersion,clearContext:true}`.                                                                                                                                                                                                                                                                       |
 | `DELETE /v1/memories/:id`                        | `{saved,privacyVersion,clearContext:true}`. Clears previous transcript/context and invalidates speech tokens so forgotten material cannot remain in short-term retrieval.                                                                                                                                                                    |
-| `GET /v1/medications` or `/v1/events/proposals`  | `{schedules:[{id,kind,label,instructions,due_at,timezone,version,recurrence:'once',...}]}`.                                                                                                                                                                                                                                                  |
-| `POST /v1/medications`                           | `{label,instructions?,dueAt?,localTime?:'HH:mm',confirmed:true,recurrence?:'once'}` → `{schedule}`. `localTime` resolves the next time in the profile timezone.                                                                                                                                                                              |
+| `GET /v1/medications` or `/v1/events/proposals`  | `{schedules:[{id,kind,label,instructions,due_at,timezone,version,recurrence:'once' or 'daily',...}]}`.                                                                                                                                                                                                                                                  |
+| `POST /v1/medications`                           | `{label,instructions?,dueAt?,localTime?:'HH:mm',confirmed:true,recurrence?:'once' or 'daily'}` → `{schedule}`. A future `dueAt` may be within 366 days. `localTime` resolves the next occurrence in the profile timezone, including the current-clock-minute/tomorrow boundary.                                                                                                                                                                              |
 | `POST /v1/events/proposals`                      | `{label? or topic, dueAt? or followupAt, confirmed:true}` → `{schedule}`. No plan is inferred complete.                                                                                                                                                                                                                                      |
-| `PATCH /v1/medications/:id` or `/v1/events/:id`  | `{expectedVersion,label?,dueAt?,enabled?}` → `{schedule}`; atomically cancels old pending occurrences.                                                                                                                                                                                                                                       |
+| `PATCH /v1/medications/:id` or `/v1/events/:id`  | `{expectedVersion,label?,instructions?,dueAt?,localTime?,recurrence?,enabled?}` → `{schedule}`; atomically cancels old pending occurrences.                                                                                                                                                                                                                                       |
 | `DELETE /v1/medications/:id` or `/v1/events/:id` | `{deleted:true}`; cancels dependent occurrences.                                                                                                                                                                                                                                                                                             |
 | `GET /v1/events`                                 | `{events:[{id,kind,label,state,action_version,expires_at,...}]}` with pending/due/snoozed foreground records only.                                                                                                                                                                                                                           |
 | `POST /v1/medication-occurrences/:id/respond` | `{action:'taken' or 'skip' or 'snooze',requestId,expectedVersion,nextNotifyAt?}` → `{event}`. Version is `action_version`; Taken is user self-report. |
 | `POST /v1/invitations/:id/respond` | `{action:'accept' or 'decline',requestId,expectedVersion}` → `{event}`. Acceptance creates `event.conversation_id`; decline pauses social invitations for 24 hours. |
-| `POST /v1/calls/session` | `{mode:'voice' or 'video',invitationId?}` → `{conversationId,conversationToken,dynamicVariables,expiresAt}`. Native ElevenLabs session; dynamic variables contain greeting/name/call binding. An incoming `invitationId` must be accepted, owned, unexpired and unused. No provider API key or custom LLM payload is returned. |
+| `POST /v1/calls/session` | `{mode:'voice' or 'video',invitationId?}` → `{conversationId,conversationToken,dynamicVariables,expiresAt}`. Native ElevenLabs session; dynamic variables contain greeting/name/call binding/current time/timezone/shared context. An incoming `invitationId` must be accepted, owned, unexpired and unused. No provider API key or custom LLM payload is returned. |
 | `GET /v1/calls/history?before=<cursor>` | Separate owner-only call summaries, newest-first, 20/page: `{calls,nextCursor,privacyVersion}`. |
+| `POST /v1/call-tools` | Native-agent webhook with `{callId,callBinding,action,...}`. `action` is remember/plan/medication/search_context. Bound active-call authorization replaces user JWT; saves require grounded source quotes, current consent and the relevant feature. No OpenAI request. |
 | `GET /v1/calls/:id/transcript` | `{call,messages,privacyVersion}` with labelled transcript source; may attempt one bounded provider recovery. |
 | `POST /v1/calls/:id/transcript` | `{providerConversationId,entries:[{role,text,timeInCallSecs}]}`. Stores owner-bound device captions only if current saving permission permits. Canonical provider text is verified separately. |
-| `DELETE /v1/calls/:id/transcript` | `{deleted:true}`; removes that archive and legacy call messages; late recovery cannot recreate it. |
+| `DELETE /v1/calls/:id/transcript` | `{deleted:true,privacyVersion}`; revokes the previous shared-context version, removes that archive and legacy call messages; late recovery cannot recreate it. |
 | `GET /v1/call-schedule` | `{schedule,incomingCall,foregroundOnly:true}`. `schedule` is null or `{id,localTime,timeZone,enabled,version,nextCallAt}`. An incoming call includes ID, version, state, scheduled/expiry timestamps. |
 | `PATCH /v1/call-schedule` | `{localTime:'HH:mm',timeZone,enabled,expectedVersion?}`. Create without version; existing schedule requires its current version. Returns updated schedule/incoming state. |
 | `DELETE /v1/call-schedule` | JSON `{expectedVersion}`. Removes the owner schedule and pending invitations. |
@@ -251,9 +265,9 @@ aliases are `store_conversations`, `memory_enabled`, `monitoring_enabled`,
 rejected. Changes invalidate speech tokens. Withdrawal purges category content
 and blocks queued access.
 
-Saved text chat and separate call transcripts persist until their respective deletion controls, conversation-saving opt-out, or account-data deletion. Clearing main text history does not delete call archives. Migration `202610160002_durable_history.sql` preserves only unexpired messages from owners who already opted in; previously expired/deleted content cannot be recovered. Their parent conversation and request records share durable retention to prevent cascading expiry. Migration `202610160003_pending_history.sql` also saves an opted-in user message before provider processing, so reopening during a reply restores it as Delivered. A recent pending reply is checked again until completion; only an actual saved reply changes it to Read. Other prototype categories keep their existing lifetimes. Conversation activity in the current dashboard is still limited to its 24-hour measurement window.
+Saved text chat and separate call transcripts persist until their respective deletion controls, conversation-saving opt-out, or account-data deletion. Clearing main text history does not delete call archives. Migration `202610160002_durable_history.sql` preserves only unexpired messages from owners who already opted in; previously expired/deleted content cannot be recovered. Their parent conversation and request records share durable retention to prevent cascading expiry. Migration `202610160003_pending_history.sql` also saves an opted-in user message before provider processing, so reopening during a reply restores it as Delivered. A recent pending reply is checked again until completion; only an actual saved reply changes it to Read. Migration007 makes saved memories and reminder definitions durable until deletion/feature opt-out; previously expired records are not recovered. Other prototype categories keep their existing lifetimes. Conversation activity in the current dashboard is still limited to its 24-hour measurement window.
 
-Account bootstrap restores the latest 50 saved messages and the active text thread. Earlier messages are loaded using an exclusive sequence cursor; new messages and equal timestamps cannot shift older pages. Migration `202610160004` moves the presentation of earlier saved voice/video messages into Settings → Call history; new calls are archived there directly. They do not appear in the main text timeline or its model context. Starting or ending a call does not clear the text history. Owner checks and RLS apply, and account/consent changes reject late history responses. The client keeps provider playback tokens only in memory, never in persisted history. The interface preview has no live replies and does not create a fake saved conversation.
+Account bootstrap restores the latest 50 saved messages and the active text thread. Earlier messages are loaded using an exclusive sequence cursor; new messages and equal timestamps cannot shift older pages. Migration `202610160004` moves the presentation of earlier saved voice/video messages into Settings → Call history; new calls are archived there directly. Full transcripts do not become text bubbles. The main chat now includes compact call-history cards that open transcript details, and permitted saved call/text content supplies shared model context. Starting or ending a call does not clear the text history. Owner checks and RLS apply, and account/consent changes reject late history responses. The client keeps provider playback tokens only in memory, never in persisted history. The interface preview has no live replies and does not create a fake saved conversation.
 
 Without conversation storage, the client sends at most ten recent turns with
 **`contextVersion == profile.consent_version`**; the server persists no
@@ -262,6 +276,16 @@ no-storage mode because the server cannot reconstitute a deleted reply; retain
 the original response in the active client buffer, or invite an explicit fresh
 message. Do not silently submit a new ID to retry a completed request. Provider
 storage controls remain independent of AIRA's database storage toggle.
+
+## Shared context and automatic actions
+
+`aira_shared_context` returns current-consent-version text and call turns, saved memories and reminder definitions for the owner. Recent conversation is bounded to 60 turns and the serialized context to roughly 32 KB; older relevant archive entries are available through keyword search. This is retrieval across channels, not unlimited history in every model request. Forgetting a memory, deleting a transcript or changing privacy revokes the prior context version. No cross-owner or role bypass is added.
+
+Text replies use structured action extraction inside the existing OpenAI flow. Each proposed save is grounded against the current user turn, validated and committed by `aira_conversation_action`; only then is a saved/updated receipt returned. The native ElevenLabs agent uses the `aira_conversation_actions` webhook configured in `voice_agent.ts`; dynamic call ID/binding identify the authorized live session, and source quotes must match recently delivered user captions. A bounded caption-race retry is allowed. Live tool handling stays entirely in Supabase and ElevenLabs.
+
+Memory facts reuse semantic keys for corrections. Clear upcoming plans receive once-only follow-ups; medicine reminders require an explicit request about the user's existing medicine/schedule and allow once/daily recurrence. Ambiguous medicine/time details require a follow-up question. No tool chooses a medicine or dose. Schedules allow dates up to 366 days ahead; edits require `expectedVersion`, cancel older pending occurrences, and do not silently overwrite a concurrent edit. The Flutter medicine editor uses explicit Singapore date/time, offers daily repeat and shows save errors inline.
+
+Current update verification: 49 backend tests and 89 Flutter tests passed; migrations007–008 and the latest API/worker are deployed. Live generated-audio tests verified two consecutive audible calls with the kid voice, text-to-call recall, native memory/plan tools, canonical transcript recovery and call-to-text recall. Live text tests verified automatic actions, future/daily medicine editing and forgotten-fact exclusion. Synthetic accounts were removed and cleanup verified; the temporary setup helper is deleted. Physical-device and real-user Google callback acceptance remain separate. See the root README for repeatable smoke commands. Earlier evidence below used Jessica and no shared save/search tool.
 
 ## Protected care views
 
@@ -319,7 +343,7 @@ quality, medical accuracy or device accessibility.
 
 ### Live integration smoke tests
 
-Current native-call release verification (16 October 2026): **72 Flutter tests and 42 Deno tests passed**, plus both JavaScript media lifecycle suites and a connected release web build. Supabase migrations004–006 and API/worker/retired-bridge functions are deployed; Firebase Hosting `aira-app-tencent` is updated. The private native agent settings were read back with `deepseek-v41-flash`, Jessica, no custom LLM or fallback, auth enabled and thinking filler disabled. A real browser WebRTC run with generated speech recognized the input and returned a spoken reply (16.1seconds for the entire fixture, not a response-latency benchmark). It then recovered the canonical provider transcript with ownership validation, verified that main text history contained no call turns, and sent a successful text message after hangup. A separate cloud check produced an invitation at the selected minute, accepted it and obtained a native session with Aira's scheduled opening greeting. Test accounts were removed and cleanup verified; the temporary setup function was deleted. Physical-device acceptance remains pending.
+Previous native-call release verification (16 October 2026, before shared context and the kid voice): **72 Flutter tests and 42 Deno tests passed**, plus both JavaScript media lifecycle suites and a connected release web build. Supabase migrations004–006 and API/worker/retired-bridge functions are deployed; Firebase Hosting `aira-app-tencent` is updated. The private native agent settings were read back with `deepseek-v41-flash`, Jessica, no custom LLM or fallback, auth enabled and thinking filler disabled. A real browser WebRTC run with generated speech recognized the input and returned a spoken reply (16.1seconds for the entire fixture, not a response-latency benchmark). It then recovered the canonical provider transcript with ownership validation, verified that main text history contained no call turns, and sent a successful text message after hangup. A separate cloud check produced an invitation at the selected minute, accepted it and obtained a native session with Aira's scheduled opening greeting. Test accounts were removed and cleanup verified; the temporary setup function was deleted. Physical-device acceptance remains pending.
 
 Historical 16 October checks of the earlier custom-LLM release passed 34 Deno and 59 Flutter tests, persisted text after browser-tab reopening and passed generated-speech WebRTC recognition/reply after the supported SDK compatibility fix. Earlier provider WebSocket/bridge timings and token checks belong to that retired architecture; they are not validation of the new native agent. Current release evidence should state which code/configuration was exercised.
 
@@ -347,7 +371,7 @@ Cleanup verifies synthetic identity markers before deletion. Keys, session token
 
 ## Known limits and next work
 
-- Supabase provisioning, provider credentials and Firebase HTTPS deployment are complete for the confirmed project. A synthetic backend test verified hosted password authentication and live OpenAI/ElevenLabs calls. Confirmation remains enabled by the user’s instruction, with email verification reported working by the user. Independent email-delivery tests, Google OAuth and hosted browser/device end-to-end tests remain to do; only Forgot password is hidden.
+- Supabase provisioning, provider credentials and Firebase HTTPS deployment are complete for the confirmed project. A synthetic backend test verified hosted password authentication and live OpenAI/ElevenLabs calls. Confirmation remains enabled by the user’s instruction, with email verification reported working by the user. Independent email-delivery tests, a real Google-account callback and hosted physical-device end-to-end tests remain to do; only Forgot password is hidden.
 - The safety classifier/rules are a conservative **unvalidated prototype**, not
   a clinical instrument. English urgency matching can miss wording; exact
   urgency evaluation, latency targets, reviewer staffing and local help
@@ -359,9 +383,7 @@ Cleanup verifies synthetic identity markers before deletion. Keys, session token
 - Native-agent and physical-device behavior need separate verification, including
   realistic interruptions, echo, the 15-minute cap and actual provider deletion.
   Saved settings do not establish deletion timing. Owner-chosen daily companion
-  calls are implemented as foreground invitations; recurring medication/routine
-  schedules, push/background calls and real recipient messaging remain absent.
-  Medication and plan schedules still use confirmed one-time 24-hour occurrences.
+  calls are implemented as foreground invitations; once/daily medicine schedules and future plan reminders are implemented. Recurring routine schedules, push/background calls and real recipient messaging remain absent. Reminder notifications are not dependable alarms and require the app to remain available.
 - The backend stores no camera frames or face-model assets. Required live
   open-source facial-expression inference belongs to the Flutter/browser media
   implementation; model quality and licence checks are separate.
@@ -373,7 +395,7 @@ Cleanup verifies synthetic identity markers before deletion. Keys, session token
   comparisons and aggregate suppression are not implemented. Never use synthetic
   history as measured impact.
 - This implementation uses stricter 24-hour incident/report expiry as well as
-  24-hour expiry for memories, reminders and wellbeing content. Opted-in conversation history instead lasts until deleted as described above. Content-free audit is seven days. Account/security
+  24-hour expiry for wellbeing content and generated reminder occurrences. Saved memories and schedule definitions now persist until removal/feature opt-out; they are not limited to 24 hours. Opted-in conversation history instead lasts until deleted as described above. Content-free audit is seven days. Account/security
   rows remain until separate account deletion. Provider usage metadata is
   trimmed after 24 hours when new media usage arrives; configure broader
   operational cleanup for a pilot.

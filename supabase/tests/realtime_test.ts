@@ -365,7 +365,17 @@ function reservationFixture(options: {
         })
         : Response.json({ token: "synthetic-provider-token" });
     }
+    if (url.pathname.endsWith("/rpc/aira_shared_context")) {
+      equal(body.p_user, USER);
+      equal(body.p_version, 3);
+      return Response.json({ memories: [], plans: [], recentConversation: [] });
+    }
     if (url.pathname.endsWith("/realtime_sessions")) {
+      if (init?.method === "PATCH") {
+        equal(body.call_binding, "test-binding-with-enough-entropy");
+        operations.push("bind");
+        return Response.json([]);
+      }
       equal(init?.method, "DELETE");
       equal(url.searchParams.get("conversation_id"), `eq.${CALL}`);
       equal(url.searchParams.get("user_id"), `eq.${USER}`);
@@ -408,7 +418,7 @@ Deno.test("Native live-call start reserves atomically and returns owner-binding 
   const response = await f.handler(startRequest());
   equal(response.status, 201);
   const body = await response.json();
-  equal(f.operations, ["reserve", "provider"]);
+  equal(f.operations, ["reserve", "provider", "bind"]);
   equal(body.conversationId, CALL);
   equal(body.conversationToken, "synthetic-provider-token");
   equal(Date.parse(body.expiresAt), f.expires);

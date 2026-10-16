@@ -20,6 +20,10 @@ external void _setSpeakerMuted(JSBoolean muted);
 external JSPromise<JSAny?> _refreshMicrophones();
 @JS('airaMedia.changeMicrophone')
 external JSPromise<JSAny?> _changeMicrophone(JSString id);
+@JS('airaMedia.refreshAudioDevices')
+external JSPromise<JSAny?> _refreshAudioDevices();
+@JS('airaMedia.changeSpeaker')
+external JSPromise<JSAny?> _changeSpeaker(JSString id);
 @JS('airaMedia.clearCallTranscript')
 external void _clearCallTranscript();
 @JS('airaMedia.sendCallContext')
@@ -139,6 +143,18 @@ class AiraMediaController extends ChangeNotifier {
   Future<void> changeMicrophone(String deviceId) async {
     if (_disposed) return;
     await _changeMicrophone(deviceId.toJS).toDart;
+    _refresh();
+  }
+
+  Future<void> refreshAudioDevices() async {
+    if (_disposed) return;
+    await _refreshAudioDevices().toDart;
+    _refresh();
+  }
+
+  Future<void> changeSpeaker(String deviceId) async {
+    if (_disposed) return;
+    await _changeSpeaker(deviceId.toJS).toDart;
     _refresh();
   }
 

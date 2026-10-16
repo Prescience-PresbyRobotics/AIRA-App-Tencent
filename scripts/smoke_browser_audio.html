@@ -15,6 +15,7 @@ const view = document.getElementById('status'), button = document.getElementById
 let active = false, ending = false, context, source, destination, instance, interval, timeout;
 let recognized = false, reply = false, inputPeak = 0, replyOutputPeak = 0, captures = 0, started = 0;
 let playbackStarted = false, connectedAt = 0, quietSince = 0, replyAt = 0, startupReason = 'startup_failed';
+let runIndex = 0, audibleReplyPeak = 0, checkpointPending = null, checkpointFingerprint = "";
 const normalize = text => String(text).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 const expected = config.expected.map(normalize);
 // The page's Permissions-Policy also disables real microphone/camera access.
@@ -53,22 +54,33 @@ async function finish(success, reason) {
   if (ending) return;
   ending = true; active = false;
   clearInterval(interval); clearTimeout(timeout);
+  try { await checkpointPending; } catch (_) {}
   airaRealtime.stop();
   try { source?.stop(); } catch (_) {}
   destination?.stream.getTracks().forEach(track => track.stop());
   try { await context?.close(); } catch (_) {}
   const result = {success, reason, seconds: Math.round((Date.now() - started) / 100) / 10,
-    microphoneStreams: captures, recognized, reply, inputPeak, replyOutputPeak};
+    microphoneStreams: captures, recognized, reply, inputPeak, replyOutputPeak, audibleReplyPeak};
   view.textContent = JSON.stringify(result, null, 2);
   document.getElementById('stop').disabled = true;
   try {
-    await fetch('/result', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Aira-Smoke': config.nonce}, body: JSON.stringify({...result, archive: {providerConversationId: airaRealtime.snapshot().voiceConversationId, entries: airaRealtime.snapshot().callTranscript}})});
+    const response = await fetch('/result', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Aira-Smoke': config.nonce}, body: JSON.stringify({...result, archive: {providerConversationId: airaRealtime.snapshot().voiceConversationId, entries: airaRealtime.snapshot().callTranscript}})});
+    if (!response.ok) throw new Error('Result rejected');
+    if (success && runIndex < config.calls) {
+      button.textContent = `Run call ${runIndex + 1} on the same page`;
+      button.disabled = false;
+      view.textContent += '\nFirst call ended. Wait for the local server’s READY message, then start the next call here without reloading.';
+    }
   } catch (_) { view.textContent += '\nThe local test server is unavailable; it will perform cleanup on timeout.'; }
 }
 document.getElementById('stop').onclick = () => finish(false, 'stopped');
 button.onclick = async () => {
+  runIndex++;
   button.disabled = true; document.getElementById('stop').disabled = false;
-  active = true; started = Date.now();
+  active = true; ending = false; started = Date.now();
+  checkpointFingerprint = '';
+  recognized = false; reply = false; inputPeak = 0; replyOutputPeak = 0; audibleReplyPeak = 0; captures = 0;
+  playbackStarted = false; connectedAt = 0; quietSince = 0; replyAt = 0; startupReason = 'startup_failed';
   // Covers fetch/decode/SDK startup as well as a connected-but-unresponsive call.
   timeout = setTimeout(() => finish(false, 'timeout'), 75000);
   view.textContent = 'Connecting the official SDK with generated speech…';
@@ -93,20 +105,33 @@ button.onclick = async () => {
     interval = setInterval(() => {
       try {
         const state = airaRealtime.snapshot();
+        const fingerprint = JSON.stringify(state.callTranscript);
+        if (state.voiceConversationId && state.callTranscript?.length && !checkpointPending && fingerprint !== checkpointFingerprint) {
+          checkpointPending = fetch('/checkpoint', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Aira-Smoke': config.nonce}, body: JSON.stringify({providerConversationId: state.voiceConversationId, entries: state.callTranscript})})
+            .then(response => { if(response.ok) checkpointFingerprint = fingerprint; })
+            .catch(() => {}).finally(() => { checkpointPending = null; });
+        }
         const input = Number(instance.getInputVolume()) || 0;
         const output = Number(instance.getOutputVolume()) || 0;
         inputPeak = Math.max(inputPeak, input);
-        if (reply && Date.now() >= replyAt) replyOutputPeak = Math.max(replyOutputPeak, output);
+        if (reply && Date.now() >= replyAt) {
+          replyOutputPeak = Math.max(replyOutputPeak, output);
+          // SDK output meters measure received audio before element volume.
+          // A silent recycled element must never count as audible playback.
+          const playingOutput = [...document.querySelectorAll('audio')].some(audio =>
+            audio.srcObject && !audio.paused && !audio.muted && audio.volume > .5 && audio.currentTime > 0);
+          if (playingOutput) audibleReplyPeak = Math.max(audibleReplyPeak, output);
+        }
         const quiet = state.callMode !== 'speaking' && output < .01 && state.agentCaption;
         quietSince = quiet ? quietSince || Date.now() : 0;
         if (!playbackStarted && ((quietSince && Date.now() - quietSince >= 1000) || Date.now() - connectedAt > 12000)) {
           playbackStarted = true;
           source.start();
         }
-        view.textContent = JSON.stringify({status: state.realtimeStatus, mode: state.callMode,
+        view.textContent = JSON.stringify({call: runIndex, status: state.realtimeStatus, mode: state.callMode,
           microphoneStreams: captures, generatedSpeechStarted: playbackStarted, recognized, reply,
-          inputPeak, replyOutputPeak}, null, 2);
-        if (recognized && reply && inputPeak > .01 && replyOutputPeak > .01) void finish(true, 'audio_recognized_and_answered');
+          inputPeak, replyOutputPeak, audibleReplyPeak}, null, 2);
+        if (recognized && reply && inputPeak > .01 && replyOutputPeak > .01 && audibleReplyPeak > .01 && (!config.sharedContext || (state.callMode !== 'speaking' && Date.now() - replyAt > 8000))) void finish(true, 'audio_recognized_and_answered');
         else if (state.realtimeStatus === 'failed' || state.realtimeStatus === 'disconnected') void finish(false, 'disconnected');
       } catch (_) { void finish(false, 'poll_failed'); }
     }, 100);

@@ -123,6 +123,9 @@ Deno.test("Native transcript ingestion binds authenticated owner and never reque
       );
       return Response.json([{ id: CALL, user_id: USER }]);
     }
+    if (url.pathname.endsWith("/aira_update_call_context")) {
+      return Response.json(true);
+    }
     calls.push(JSON.parse(String(init?.body)));
     return Response.json(true);
   };

@@ -4,6 +4,7 @@ import 'package:aira/controller.dart';
 import 'package:aira/media/aira_media.dart';
 import 'package:aira/screens/call.dart';
 import 'package:aira/widgets/companion.dart';
+import 'package:aira/widgets/companion_park.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -12,6 +13,7 @@ class FakeController extends AiraController {
   int starts = 0, ends = 0, publishes = 0;
   Completer<Map<String, dynamic>>? startResult;
   Completer<void>? consentResult;
+  Completer<void>? contextResult;
   String? sentFeeling;
   final archives = <Map<String, dynamic>>[];
   Completer<void>? archiveResult;
@@ -48,6 +50,7 @@ class FakeController extends AiraController {
     publishes++;
     sentCue = cueSummary;
     sentFeeling = selfReportedFeeling;
+    await contextResult?.future;
   }
 
   @override
@@ -67,6 +70,17 @@ class FakeMedia extends AiraMediaController {
   int cameraStarts = 0, realtimeStarts = 0, stops = 0, detectionStarts = 0;
   Completer<void>? connectResult;
   bool outputMuted = false;
+  String? selectedOutput;
+  final contexts = <String>[];
+  @override
+  void sendCallContext(String text) => contexts.add(text);
+  @override
+  Future<void> refreshAudioDevices() async {}
+  @override
+  Future<void> changeSpeaker(String id) async {
+    selectedOutput = id;
+  }
+
   @override
   void setSpeakerMuted(bool muted) {
     outputMuted = muted;
@@ -142,14 +156,17 @@ Future<void> openCall(
   bool video = false,
   Size surfaceSize = const Size(900, 1400),
   double textScale = 1,
+  bool reducedMotion = false,
 }) async {
   await tester.binding.setSurfaceSize(surfaceSize);
   addTearDown(() => tester.binding.setSurfaceSize(null));
   await tester.pumpWidget(
     MaterialApp(
       builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context)
-            .copyWith(textScaler: TextScaler.linear(textScale)),
+        data: MediaQuery.of(context).copyWith(
+          textScaler: TextScaler.linear(textScale),
+          disableAnimations: reducedMotion,
+        ),
         child: child!,
       ),
       home: Builder(
@@ -340,7 +357,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 250));
       expect(controller.sentFeeling, 'sad');
       expect(controller.sentCue?['label'], 'happy');
-      expect(find.text('AI-estimated emotion: Happy'), findsNWidgets(2));
+      expect(find.text('Happy'), findsNWidgets(2));
       expect(find.textContaining('You said: Sad'), findsOneWidget);
       media.update(
         const AiraMediaState(
@@ -468,19 +485,21 @@ void main() {
     },
   );
 
-  testWidgets('desktop video preview sits beside the centered mascot', (
-    tester,
-  ) async {
-    final media = FakeMedia(), controller = FakeController();
-    await openCall(tester, controller, media, video: true);
-    await tester.pump(const Duration(milliseconds: 400));
-    final character = tester.getRect(find.byType(Companion));
-    final camera = tester.getRect(find.byType(AiraCameraPreview));
-    expect(character.center.dx, closeTo(450, 1));
-    expect(camera.left, greaterThan(character.right));
-    expect(camera.right, lessThanOrEqualTo(900));
-    await closeTree(tester);
-  });
+  testWidgets(
+    'desktop video uses a park with larger preview outside the roaming area',
+    (tester) async {
+      final media = FakeMedia(), controller = FakeController();
+      await openCall(tester, controller, media, video: true);
+      await tester.pump(const Duration(milliseconds: 400));
+      final character = tester.getRect(find.byType(Companion));
+      final camera = tester.getRect(find.byType(AiraCameraPreview));
+      expect(find.byType(CompanionPark), findsOneWidget);
+      expect(camera.size, const Size(220, 260));
+      expect(camera.left, greaterThan(character.right));
+      expect(camera.right, lessThanOrEqualTo(900));
+      await closeTree(tester);
+    },
+  );
   testWidgets('hangup releases texting before transcript saving completes', (
     tester,
   ) async {
@@ -510,4 +529,128 @@ void main() {
     expect(controller.archives.last['entries'], hasLength(2));
     await closeTree(tester);
   });
+
+  testWidgets(
+    'Audio devices exposes speaker routing and honest unsupported fallback',
+    (tester) async {
+      final media = FakeMedia(), controller = FakeController();
+      await openCall(tester, controller, media);
+      media.update(
+        const AiraMediaState(
+          realtimeStatus: 'connected',
+          speakerSelectionSupported: true,
+          selectedMicrophoneId: 'mic',
+          availableMicrophones: [
+            AudioInputDevice(id: 'mic', label: 'Built-in microphone'),
+          ],
+          availableSpeakers: [
+            AudioOutputDevice(id: 'default', label: 'System default'),
+            AudioOutputDevice(id: 'headset', label: 'USB headphones'),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.text('Audio devices'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Audio input'), findsOneWidget);
+      expect(find.text('Speaker / headphones'), findsOneWidget);
+      await tester.tap(find.text('System default'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('USB headphones').last);
+      await tester.pump();
+      expect(media.selectedOutput, 'headset');
+      media.update(const AiraMediaState(realtimeStatus: 'connected'));
+      await tester.pump();
+      expect(find.text('System default speaker'), findsOneWidget);
+      expect(find.textContaining('device sound settings'), findsOneWidget);
+      expect(find.text('Speaker / headphones'), findsNothing);
+      await closeTree(tester);
+    },
+  );
+
+  testWidgets('phone park motion remains below the enlarged self-view', (
+    tester,
+  ) async {
+    final media = FakeMedia(), controller = FakeController();
+    await openCall(
+      tester,
+      controller,
+      media,
+      video: true,
+      surfaceSize: const Size(375, 900),
+    );
+    final camera = tester.getRect(find.byType(AiraCameraPreview));
+    expect(camera.size, const Size(140, 180));
+    final first = tester.getRect(find.byType(Companion));
+    await tester.pump(const Duration(seconds: 6));
+    final moved = tester.getRect(find.byType(Companion));
+    expect(first.left, isNot(moved.left));
+    expect(first.overlaps(camera), false);
+    expect(moved.overlaps(camera), false);
+    expect(tester.takeException(), isNull);
+    await closeTree(tester);
+  });
+
+  testWidgets(
+    'park respects reduced motion while keeping the character visible',
+    (tester) async {
+      final media = FakeMedia(), controller = FakeController();
+      await openCall(
+        tester,
+        controller,
+        media,
+        video: true,
+        reducedMotion: true,
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      final first = tester.getRect(find.byType(Companion));
+      await tester.pump(const Duration(seconds: 6));
+      expect(tester.getRect(find.byType(Companion)), first);
+      expect(
+        tester.widget<Companion>(find.byType(Companion)).reducedMotion,
+        true,
+      );
+      await closeTree(tester);
+    },
+  );
+
+  testWidgets(
+    'camera loss clears native context even while server sync is pending',
+    (tester) async {
+      final media = FakeMedia(), controller = FakeController();
+      controller.preferences['face_cues'] = true;
+      controller.contextResult = Completer<void>();
+      await openCall(tester, controller, media, video: true);
+      media.update(
+        AiraMediaState(
+          camera: 'on',
+          realtimeStatus: 'connected',
+          detection: 'ready',
+          detectionEnabled: true,
+          emotion: 'happy',
+          faceCount: 1,
+          observedAt: DateTime.now(),
+        ),
+      );
+      await tester.pump();
+      expect(
+        media.contexts.last,
+        contains('facial expression estimate: happy'),
+      );
+      media.update(
+        const AiraMediaState(realtimeStatus: 'connected', camera: 'off'),
+      );
+      await tester.pump();
+      expect(media.contexts.last, contains('unknown/cleared'));
+      expect(
+        media.contexts.last,
+        contains('Camera check-in: ineligible/cleared'),
+      );
+      controller.contextResult!.complete();
+      await tester.pump();
+      await closeTree(tester);
+    },
+  );
 }

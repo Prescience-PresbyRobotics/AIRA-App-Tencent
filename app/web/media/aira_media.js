@@ -63,7 +63,7 @@
     faceOverlay.style.display = 'block';
     faceOverlay.style.left = `${rect.x}px`; faceOverlay.style.top = `${rect.y}px`;
     faceOverlay.style.width = `${rect.width}px`; faceOverlay.style.height = `${rect.height}px`;
-    faceLabel.textContent = state.emotion ? `AI estimate: ${state.emotion}`
+    faceLabel.textContent = state.emotion ? `${state.emotion[0].toUpperCase()}${state.emotion.slice(1)}`
       : state.detection === 'detecting' ? 'Reading expression…' : 'Expression uncertain';
   }
   function attachPreview(element) {
@@ -361,7 +361,7 @@
     if (window.airaRealtime) return window.airaRealtime.prepare();
     if (!realtimeModule) realtimeModule = new Promise((resolve, reject) => {
       const script = document.createElement('script');
-      script.src = new URL('realtime_client.js?v=20261016c', base).href;
+      script.src = new URL('realtime_client.js?v=20261016d', base).href;
       script.onload = resolve;
       script.onerror = () => { realtimeModule = null; script.remove(); reject(new Error('Voice software could not load.')); };
       document.head.appendChild(script);
@@ -386,6 +386,8 @@
   function setSpeakerMuted(value) { window.airaRealtime?.speakerMute(value); }
   async function refreshMicrophones() { await window.airaRealtime?.refreshMicrophones(); }
   async function changeMicrophone(id) { await window.airaRealtime?.changeMicrophone(id); }
+  async function refreshAudioDevices() { await window.airaRealtime?.refreshAudioDevices(); }
+  async function changeSpeaker(id) { await window.airaRealtime?.changeSpeaker(id); }
   let ringtoneContext, ringtoneTimer;
   function stopIncomingRingtone() {
     clearInterval(ringtoneTimer); ringtoneTimer = null;
@@ -439,7 +441,7 @@
         playing: state.playing || (realtime?.realtimeStatus === 'connected' && realtime?.callMode === 'speaking'),
         recordingSeconds: state.recordingStartedAt == null ? 0 : Math.min(45, Math.floor((Date.now() - state.recordingStartedAt) / 1000))});
     },
-    attachPreview, projectFace, startCamera, stopCamera, prepareRealtime, startRealtime, stopRealtime, setMicMuted, setSpeakerMuted, refreshMicrophones, changeMicrophone,
+    attachPreview, projectFace, startCamera, stopCamera, prepareRealtime, startRealtime, stopRealtime, setMicMuted, setSpeakerMuted, refreshMicrophones, changeMicrophone, refreshAudioDevices, changeSpeaker,
     setDetection, startRecording, finishRecording, cancelRecording, playAudio, stopPlayback, stopAll,
   });
 })();

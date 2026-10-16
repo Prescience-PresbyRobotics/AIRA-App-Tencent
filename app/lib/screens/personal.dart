@@ -82,7 +82,7 @@ class PersonalScreen extends StatelessWidget {
                       context: c,
                       initialDate: date,
                       firstDate: DateTime.now(),
-                      lastDate: DateTime.now().add(const Duration(hours: 24)),
+                      lastDate: DateTime.now().add(const Duration(days: 366)),
                     );
                     if (d == null || !c.mounted) return;
                     final t = await showTimePicker(
@@ -106,7 +106,7 @@ class PersonalScreen extends StatelessWidget {
                 ),
                 const AiraGap(height: 10),
                 const Text(
-                  'Device local time. Choose within the next 24 hours.',
+                  'Device local time. Choose a future date within the next year.',
                   style: TextStyle(fontSize: 13, color: AiraColors.muted),
                 ),
               ],
@@ -136,82 +136,15 @@ class PersonalScreen extends StatelessWidget {
     }
   }
 
-  Future<void> medicine(BuildContext c) async {
-    final name = TextEditingController(),
-        instructions = TextEditingController();
-    TimeOfDay time = TimeOfDay.now();
-    final saved = await showDialog<bool>(
+  Future<void> medicine(
+    BuildContext c, [
+    Map<String, dynamic>? existing,
+  ]) async {
+    await showDialog<void>(
       context: c,
-      builder: (c) => StatefulBuilder(
-        builder: (c, set) => AlertDialog(
-          title: const Text('Add a medicine reminder'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Notice(
-                  'Use an existing schedule. AIRA does not choose or change a dose. Prototype: one reminder, not a repeating prescription.',
-                ),
-                const AiraGap(height: 18),
-                TextField(
-                  controller: name,
-                  decoration: const InputDecoration(
-                    labelText: 'Medicine label',
-                  ),
-                ),
-                const AiraGap(height: 14),
-                TextField(
-                  controller: instructions,
-                  maxLines: 2,
-                  decoration: const InputDecoration(
-                    labelText: 'Existing instructions',
-                  ),
-                ),
-                const AiraGap(height: 14),
-                OutlinedButton.icon(
-                  onPressed: () async {
-                    final selected = await showTimePicker(
-                      context: c,
-                      initialTime: time,
-                    );
-                    if (selected != null) set(() => time = selected);
-                  },
-                  icon: const Icon(Icons.schedule),
-                  label: Text(time.format(c)),
-                ),
-                const AiraGap(height: 10),
-                const Text(
-                  'Singapore time (UTC+8). Confirm that this matches your existing instructions.',
-                  style: TextStyle(fontSize: 15),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(c, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () =>
-                  name.text.trim().isEmpty ? null : Navigator.pop(c, true),
-              child: const Text('Confirm reminder'),
-            ),
-          ],
-        ),
-      ),
+      builder: (_) =>
+          _MedicineDialog(controller: controller, existing: existing),
     );
-    if (saved == true) {
-      try {
-        await controller.saveMedicine(
-          name.text.trim(),
-          instructions.text.trim(),
-          time,
-        );
-      } catch (e) {
-        if (c.mounted) showMessage(c, AiraController.cleanError(e));
-      }
-    }
   }
 
   Future<void> checkin(BuildContext c) async {
@@ -256,7 +189,7 @@ class PersonalScreen extends StatelessWidget {
                 icon: Icons.bookmark_border_rounded,
                 color: AiraColors.sage,
                 value: '${controller.memories.length}',
-                subtitle: 'Things you asked AIRA to remember',
+                subtitle: 'Things AIRA has learned about you',
                 onTap: () => _open(c, 'Memories'),
               ),
               AiraSummaryCard(
@@ -272,7 +205,7 @@ class PersonalScreen extends StatelessWidget {
                 icon: Icons.medication_outlined,
                 color: AiraColors.lavender,
                 value: '${controller.medications.length}',
-                subtitle: 'Your confirmed schedule',
+                subtitle: 'Your existing medicine schedule',
                 onTap: () => _open(c, 'Medicine reminders'),
               ),
               AiraSummaryCard(
@@ -333,7 +266,7 @@ class PersonalScreen extends StatelessWidget {
         if (ctl.memories.isEmpty)
           _empty(
             'What would you like AIRA to remember?',
-            'Your interests, favourite things, and stories. Only with your say-so.',
+            'AIRA saves details you share in chats and calls when Saved memories is on. You can also add one here.',
           )
         else
           for (final m in ctl.memories)
@@ -342,7 +275,9 @@ class PersonalScreen extends StatelessWidget {
               m['user_approved_text']?.toString() ??
                   m['text']?.toString() ??
                   '',
-              'Saved with your permission',
+              m['source_mode'] == null
+                  ? 'Saved memory · You can remove it anytime'
+                  : 'From your ${m['source_mode']} conversation',
               Icons.bookmark_border_rounded,
               () async {
                 if (await confirmAction(
@@ -373,7 +308,7 @@ class PersonalScreen extends StatelessWidget {
         if (ctl.plans.isEmpty)
           _empty(
             'Any plans coming up?',
-            'Choose something you’d like AIRA to ask you about.',
+            'With Invite me to chat on, AIRA saves upcoming plans you mention in chats and calls. Include a date and time, or add one here.',
           )
         else
           for (final e in ctl.plans)
@@ -402,20 +337,20 @@ class PersonalScreen extends StatelessWidget {
           c,
           'Medicine reminders',
           Icons.medication_outlined,
-          'Gentle reminders for your confirmed schedule.',
+          'Gentle reminders for medicine you already take.',
           () => medicine(c),
         ),
         if (ctl.medications.isEmpty)
           _empty(
             'No reminders yet',
-            'Add an existing schedule. You stay in control.',
+            'Ask AIRA in chat or a call to remind you. Include the medicine and time, or add one here.',
           )
         else
           for (final m in ctl.medications)
             _item(
               c,
               m['label']?.toString() ?? 'Medicine reminder',
-              '${m['instructions'] ?? ''} · ${m['local_time'] ?? _date(m['due_at'])}',
+              '${m['instructions'] ?? ''} · ${_medicineDate(m)}',
               Icons.medication_outlined,
               () async {
                 try {
@@ -426,6 +361,7 @@ class PersonalScreen extends StatelessWidget {
                   }
                 }
               },
+              edit: () => medicine(c, m),
             ),
 
         const AiraGap(height: 16),
@@ -477,6 +413,15 @@ class PersonalScreen extends StatelessWidget {
         ),
       ],
     };
+  }
+
+  String _medicineDate(Map<String, dynamic> medicine) {
+    final date = DateTime.tryParse(medicine['due_at']?.toString() ?? '');
+    final time = date == null
+        ? medicine['local_time']?.toString() ?? 'Time not set'
+        : DateFormat('d MMM, h:mm a')
+              .format(date.toUtc().add(const Duration(hours: 8)));
+    return '$time SGT${medicine['recurrence'] == 'daily' ? ' · Daily' : ' · Once'}';
   }
 
   String _date(dynamic value) {
@@ -536,8 +481,9 @@ class PersonalScreen extends StatelessWidget {
     String title,
     String sub,
     IconData icon,
-    VoidCallback remove,
-  ) => AiraPadding(
+    VoidCallback remove, {
+    VoidCallback? edit,
+  }) => AiraPadding(
     padding: const EdgeInsets.only(bottom: 10),
     child: AiraCard(
       padding: const EdgeInsets.all(16),
@@ -555,6 +501,12 @@ class PersonalScreen extends StatelessWidget {
               ],
             ),
           ),
+          if (edit != null)
+            IconButton(
+              tooltip: 'Edit $title',
+              onPressed: edit,
+              icon: const Icon(Icons.edit_outlined),
+            ),
           IconButton(
             tooltip: 'Remove $title',
             onPressed: remove,
@@ -563,6 +515,201 @@ class PersonalScreen extends StatelessWidget {
         ],
       ),
     ),
+  );
+}
+
+class _MedicineDialog extends StatefulWidget {
+  const _MedicineDialog({required this.controller, this.existing});
+  final AiraController controller;
+  final Map<String, dynamic>? existing;
+  @override
+  State<_MedicineDialog> createState() => _MedicineDialogState();
+}
+
+class _MedicineDialogState extends State<_MedicineDialog> {
+  late final TextEditingController name, instructions;
+  late DateTime date;
+  late TimeOfDay time;
+  bool daily = false, saving = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    final existing = widget.existing;
+    name = TextEditingController(text: existing?['label']?.toString() ?? '');
+    instructions = TextEditingController(
+      text: existing?['instructions']?.toString() ?? '',
+    );
+    final now = DateTime.now().toUtc().add(
+      const Duration(hours: 8, minutes: 5),
+    );
+    var selected = DateTime.tryParse(existing?['due_at']?.toString() ?? '')
+        ?.toUtc()
+        .add(const Duration(hours: 8));
+    // A previous occurrence may already have passed. Editing schedules a future one.
+    if (selected == null || !selected.isAfter(now)) selected = now;
+    date = DateTime(selected.year, selected.month, selected.day);
+    time = TimeOfDay(hour: selected.hour, minute: selected.minute);
+    daily = existing?['recurrence'] == 'daily';
+  }
+
+  @override
+  void dispose() {
+    name.dispose();
+    instructions.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    if (name.text.trim().isEmpty) {
+      setState(() => error = 'Enter your medicine label.');
+      return;
+    }
+    setState(() {
+      saving = true;
+      error = null;
+    });
+    try {
+      // The form is explicitly Singapore time, independent of the device zone.
+      final dueAt = DateTime.utc(
+        date.year,
+        date.month,
+        date.day,
+        time.hour,
+        time.minute,
+      ).subtract(const Duration(hours: 8));
+      await widget.controller.saveMedicine(
+        name.text.trim(),
+        instructions.text.trim(),
+        time,
+        dueAt: dueAt,
+        existing: widget.existing,
+        recurrence: daily ? 'daily' : 'once',
+      );
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) setState(() => error = AiraController.cleanError(e));
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(
+      widget.existing == null
+          ? 'Add a medicine reminder'
+          : 'Edit medicine reminder',
+    ),
+    content: SizedBox(
+      width: 440,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Notice(
+              'Use your existing instructions. AIRA does not choose or change a dose.',
+            ),
+            const AiraGap(height: 18),
+            TextField(
+              controller: name,
+              enabled: !saving,
+              maxLength: 120,
+              decoration: const InputDecoration(labelText: 'Medicine label'),
+            ),
+            const AiraGap(height: 14),
+            TextField(
+              controller: instructions,
+              enabled: !saving,
+              maxLines: 2,
+              maxLength: 500,
+              decoration: const InputDecoration(
+                labelText: 'Existing instructions (optional)',
+              ),
+            ),
+            const AiraGap(height: 14),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: saving
+                      ? null
+                      : () async {
+                          final now = DateTime.now().toUtc().add(
+                            const Duration(hours: 8),
+                          );
+                          final selected = await showDatePicker(
+                            context: context,
+                            initialDate: date,
+                            firstDate: DateTime(now.year, now.month, now.day),
+                            lastDate: now.add(const Duration(days: 366)),
+                          );
+                          if (selected != null && mounted) {
+                            setState(() => date = selected);
+                          }
+                        },
+                  icon: const Icon(Icons.calendar_today_outlined),
+                  label: Text(DateFormat('d MMM yyyy').format(date)),
+                ),
+                OutlinedButton.icon(
+                  onPressed: saving
+                      ? null
+                      : () async {
+                          final selected = await showTimePicker(
+                            context: context,
+                            initialTime: time,
+                          );
+                          if (selected != null && mounted) {
+                            setState(() => time = selected);
+                          }
+                        },
+                  icon: const Icon(Icons.schedule),
+                  label: Text(time.format(context)),
+                ),
+              ],
+            ),
+            const AiraGap(height: 10),
+            const Text(
+              'Singapore time (UTC+8). Choose the first reminder date and time.',
+              style: TextStyle(fontSize: 14, color: AiraColors.muted),
+            ),
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Repeat daily'),
+              subtitle: Text(
+                daily
+                    ? 'At this time every day'
+                    : 'One reminder on the selected date',
+              ),
+              value: daily,
+              onChanged: saving
+                  ? null
+                  : (value) => setState(() => daily = value),
+            ),
+            if (error != null) Notice(error!),
+          ],
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: saving ? null : () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: saving ? null : save,
+        child: Text(
+          saving
+              ? 'Saving…'
+              : widget.existing == null
+              ? 'Confirm reminder'
+              : 'Save changes',
+        ),
+      ),
+    ],
   );
 }
 

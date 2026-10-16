@@ -43,6 +43,8 @@ class ChatTurn {
   final int? contextVersion;
   final BigInt? historyOrder;
   final String? requestStatus;
+  final List<Map<String, dynamic>> actions;
+  final String? actionNotice;
   MessageDelivery delivery;
   String? issue;
   ChatTurn({
@@ -54,6 +56,8 @@ class ChatTurn {
     this.contextVersion,
     this.historyOrder,
     this.requestStatus,
+    this.actions = const [],
+    this.actionNotice,
     DateTime? time,
     this.delivery = MessageDelivery.read,
   }) : id = id ?? requestUuid(),
@@ -132,7 +136,7 @@ class AiraController extends ChangeNotifier {
   List<Map<String, dynamic>> memories = [], plans = [], medications = [];
   List<ChatTurn> messages = [];
   List<Map<String, dynamic>> callHistory = [];
-  bool callHistoryLoading = false;
+  bool callHistoryLoading = false, callHistoryLoaded = false;
   String callHistoryError = '';
   String? callHistoryCursor;
   int _callHistoryGeneration = 0;
@@ -158,7 +162,8 @@ class AiraController extends ChangeNotifier {
         DateTime.now().difference(turn.time) < const Duration(minutes: 2),
   );
   bool get showIntroduction =>
-      _introduction != null || (visibleMessages.isEmpty && !historyLoading);
+      _introduction != null ||
+      (visibleMessages.isEmpty && callHistory.isEmpty && !historyLoading);
   int _historyGeneration = 0;
   ChatTurn get introduction => _introduction ??= ChatTurn(
     text: name.trim().isEmpty
@@ -254,7 +259,11 @@ class AiraController extends ChangeNotifier {
       capabilities = Map<String, dynamic>.from(data['capabilities'] ?? {});
       onboarded =
           profile['onboarded'] == true || preferences['onboarded'] == true;
-      await Future.wait([refreshPersonal(), refreshHistory()]);
+      await Future.wait([
+        refreshPersonal(),
+        refreshHistory(),
+        refreshCallHistory(),
+      ]);
     } catch (e) {
       if (!_current(epoch)) return;
       error = 'Could not load your account. ${cleanError(e)}';
@@ -265,7 +274,14 @@ class AiraController extends ChangeNotifier {
   }
 
   static String cleanError(Object e) {
-    if (e is AuthException) return e.message;
+    if (e is AuthException) {
+      final message = e.message.toLowerCase();
+      if (message.contains('unsupported provider') ||
+          message.contains('provider is not enabled')) {
+        return 'Google sign-in is not available yet. Please use email to sign in for now.';
+      }
+      return e.message;
+    }
     if (e is AiraException) return e.message;
     return 'Please check your connection and try again.';
   }
@@ -371,13 +387,15 @@ class AiraController extends ChangeNotifier {
     pendingRequest = null;
     pendingText = null;
     notifyListeners();
-    if (key == 'store_conversations' && value) await refreshHistory();
+    if (key == 'store_conversations' && value) {
+      await Future.wait([refreshHistory(), refreshCallHistory()]);
+    }
   }
 
   void _clearCallHistory() {
     _callHistoryGeneration++;
     callHistory = [];
-    callHistoryLoading = false;
+    callHistoryLoading = callHistoryLoaded = false;
     callHistoryError = '';
     callHistoryCursor = null;
   }
@@ -434,6 +452,8 @@ class AiraController extends ChangeNotifier {
               contextVersion: item['contextVersion'] as int?,
               historyOrder: BigInt.tryParse(item['order']?.toString() ?? ''),
               requestStatus: item['requestStatus']?.toString(),
+              actions: _items(item, 'actions'),
+              actionNotice: item['actionNotice']?.toString(),
               delivery: item['delivery'] == 'delivered'
                   ? MessageDelivery.delivered
                   : MessageDelivery.read,
@@ -703,6 +723,8 @@ class AiraController extends ChangeNotifier {
         fromAira: true,
         id: result['messageId']?.toString(),
         speechToken: result['speechToken']?.toString(),
+        actions: _items(result, 'actions'),
+        actionNotice: result['actionNotice']?.toString(),
         contextVersion: privacyVersion,
         mode: mode,
       );
@@ -718,6 +740,8 @@ class AiraController extends ChangeNotifier {
       if (firstReply) suggestedName = _nameFromFirstReply(content);
       pendingText = null;
       pendingRequest = null;
+      // A successful reply stays successful even if a secondary list refresh fails.
+      if (reply.actions.isNotEmpty) unawaited(refreshConversationDetails());
       return reply;
     } catch (e) {
       if (_current(session) && epoch == revision) {
@@ -744,6 +768,14 @@ class AiraController extends ChangeNotifier {
     pendingText = message.text;
     pendingRequest = message.id;
     return send(message.text);
+  }
+
+  Future<void> refreshConversationDetails() async {
+    try {
+      await refreshPersonal();
+    } catch (_) {
+      // About me can retry independently; do not retry a delivered chat or call.
+    }
   }
 
   Future<void> saveMemory(String text) async {
@@ -783,10 +815,8 @@ class AiraController extends ChangeNotifier {
   Future<void> savePlan(String title, DateTime at) async {
     final epoch = sessionEpoch;
     if (!at.isAfter(DateTime.now()) ||
-        at.isAfter(DateTime.now().add(const Duration(hours: 24)))) {
-      throw const AiraException(
-        'Choose a future time within the next 24 hours for this prototype.',
-      );
+        at.isAfter(DateTime.now().add(const Duration(days: 366)))) {
+      throw const AiraException('Choose a future time within the next year.');
     }
     if (!consent('social_reminders')) {
       throw const AiraException(
@@ -826,34 +856,66 @@ class AiraController extends ChangeNotifier {
   Future<void> saveMedicine(
     String label,
     String instructions,
-    TimeOfDay time,
-  ) async {
+    TimeOfDay time, {
+    DateTime? dueAt,
+    Map<String, dynamic>? existing,
+    String recurrence = 'once',
+  }) async {
     final epoch = sessionEpoch;
     if (!consent('medication_reminders')) {
       throw const AiraException(
         'Please enable medication reminders in Settings first.',
       );
     }
+    if (dueAt != null &&
+        (!dueAt.isAfter(DateTime.now()) ||
+            dueAt.isAfter(DateTime.now().add(const Duration(days: 366))))) {
+      throw const AiraException('Choose a future time within the next year.');
+    }
     final clock =
         '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+    final data = <String, dynamic>{
+      'label': label,
+      'instructions': instructions,
+      if (dueAt != null)
+        'dueAt': dueAt.toUtc().toIso8601String()
+      else
+        'localTime': clock,
+      'timezone': 'Asia/Singapore',
+      'confirmed': true,
+      'sourceType': 'user_entered',
+      'recurrence': recurrence,
+      if (existing != null) 'expectedVersion': existing['version'],
+    };
     if (preview) {
-      medications.add({
-        'id': DateTime.now().microsecondsSinceEpoch.toString(),
+      final updated = {
+        'id':
+            existing?['id'] ?? DateTime.now().microsecondsSinceEpoch.toString(),
         'label': label,
         'instructions': instructions,
         'local_time': clock,
-      });
+        if (dueAt != null) 'due_at': dueAt.toUtc().toIso8601String(),
+        'recurrence': recurrence,
+        'version': (existing?['version'] as int? ?? 0) + 1,
+      };
+      if (existing != null) {
+        medications.removeWhere((item) => item['id'] == existing['id']);
+      }
+      medications.add(updated);
     } else {
-      await api.request('POST', '/medications', {
-        'label': label,
-        'instructions': instructions,
-        'localTime': clock,
-        'timezone': 'Asia/Singapore',
-        'confirmed': true,
-        'sourceType': 'user_entered',
-      });
+      final result = await api.request(
+        existing == null ? 'POST' : 'PATCH',
+        existing == null ? '/medications' : '/medications/${existing['id']}',
+        data,
+      );
       if (!_current(epoch)) return;
-      await refreshPersonal();
+      if (result['schedule'] case final Map saved) {
+        final schedule = Map<String, dynamic>.from(saved);
+        medications.removeWhere((item) => item['id'] == schedule['id']);
+        medications.add(schedule);
+      }
+      // A failed list reload must not offer a duplicate create after a save.
+      await refreshConversationDetails();
     }
     if (_current(epoch)) notifyListeners();
   }
@@ -946,12 +1008,19 @@ class AiraController extends ChangeNotifier {
         );
       }
       final merged = <String, Map<String, dynamic>>{
-        if (older)
-          for (final call in callHistory) call['id'].toString(): call,
+        for (final call in callHistory) call['id'].toString(): call,
         for (final call in _items(result, 'calls')) call['id'].toString(): call,
       };
-      callHistory = merged.values.toList();
-      callHistoryCursor = result['nextCursor']?.toString();
+      callHistory = merged.values.toList()
+        ..sort((a, b) {
+          final left = DateTime.tryParse(a['startedAt']?.toString() ?? '');
+          final right = DateTime.tryParse(b['startedAt']?.toString() ?? '');
+          return left == null || right == null ? 0 : right.compareTo(left);
+        });
+      if (older || !callHistoryLoaded) {
+        callHistoryCursor = result['nextCursor']?.toString();
+      }
+      callHistoryLoaded = true;
     } catch (e) {
       if (_current(session) && generation == _callHistoryGeneration) {
         callHistoryError = cleanError(e);
@@ -998,13 +1067,22 @@ class AiraController extends ChangeNotifier {
       'providerConversationId': providerConversationId,
       'entries': entries,
     });
-    if (_current(session) && !callBusy) unawaited(refreshCallHistory());
+    if (_current(session)) {
+      unawaited(refreshConversationDetails());
+      if (!callBusy) unawaited(refreshCallHistory());
+    }
   }
 
   Future<void> deleteCallTranscript(String id) async {
     final session = sessionEpoch;
-    if (!preview) await api.request('DELETE', '/calls/$id/transcript');
+    cancelSend();
+    if (!preview) {
+      final result = await api.request('DELETE', '/calls/$id/transcript');
+      if (!_current(session)) return;
+      privacyVersion = result['privacyVersion'] as int? ?? privacyVersion;
+    }
     if (!_current(session)) return;
+    pendingRequest = pendingText = null;
     _callHistoryGeneration++;
     callHistoryLoading = false;
     callHistory.removeWhere((call) => call['id'] == id);
@@ -1179,6 +1257,7 @@ class AiraController extends ChangeNotifier {
   }
 
   Future<void> endCall() async {
+    final session = sessionEpoch;
     cancelSend();
     final id = activeCallId;
     activeCallId = '';
@@ -1193,6 +1272,9 @@ class AiraController extends ChangeNotifier {
         /* Local capture must still end if the backend is unavailable. */
       }
     }
+    if (!_current(session)) return;
+    unawaited(refreshCallHistory());
+    unawaited(refreshConversationDetails());
     notifyListeners();
   }
 
@@ -1262,10 +1344,25 @@ class AiraController extends ChangeNotifier {
   }
 
   Future<void> signOut() async {
+    // Start closing the owned call while its auth token is still available.
+    // Clear local state immediately so routes/media dispose even when offline.
+    final closing = !preview && activeCallId.isNotEmpty
+        ? api
+              .request('POST', '/calls/$activeCallId/end', {})
+              .timeout(const Duration(seconds: 5))
+              .then<void>((_) {})
+              .catchError((Object _) {})
+        : Future<void>.value();
     _signingOut = true;
     _identity = null;
     _clear();
-    if (client != null) await client!.auth.signOut();
+    try {
+      if (client != null) {
+        await client!.auth.signOut(scope: SignOutScope.local);
+      }
+    } finally {
+      await closing;
+    }
   }
 
   @override
