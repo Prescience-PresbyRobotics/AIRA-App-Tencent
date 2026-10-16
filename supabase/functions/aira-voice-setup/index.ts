@@ -1,220 +1,60 @@
-// One-time infrastructure setup. Deploy explicitly, invoke with worker secret, then delete.
+// Temporary infrastructure helper. Deploy explicitly, invoke with worker secret, then delete.
 import { sameSecret } from "../_shared/domain.ts";
-import { FIRST_GREETING, FRIEND_PROMPT } from "../_shared/providers.ts";
 import { env } from "../_shared/runtime.ts";
+import { nativeAgentSettings } from "../_shared/voice_agent.ts";
 Deno.serve(async (req) => {
   const secret = env("AIRA_WORKER_SECRET");
-  const reply = (body: unknown, status = 200) =>
-    new Response(JSON.stringify(body), {
-      status,
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-store",
-      },
-    });
-  if (
-    req.method !== "POST" || secret.length < 32 ||
-    !sameSecret(req.headers.get("x-aira-worker-secret") ?? "", secret)
-  ) return reply({ error: "unauthorized" }, 401);
-  const key = env("ELEVENLABS_API_KEY"),
-    bridge = env("AIRA_REALTIME_BRIDGE_SECRET");
-  if (!key || bridge.length < 32) {
-    return reply({ error: "missing_configuration" }, 503);
+  const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+    status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+  if (req.method !== "POST" || secret.length < 32 || !sameSecret(req.headers.get("x-aira-worker-secret") ?? "", secret)) {
+    return reply({ error: "unauthorized" }, 401);
   }
-  async function api(path: string, method: string, body: unknown) {
+  const key = env("ELEVENLABS_API_KEY");
+  if (!key) return reply({ error: "missing_configuration" }, 503);
+  async function api(path: string, method = "GET", body?: unknown) {
     const r = await fetch(`https://api.elevenlabs.io/v1/convai/${path}`, {
-      method,
-      headers: { "xi-api-key": key, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      method, headers: { "xi-api-key": key, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
     });
     const b = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      throw {
-        status: r.status,
-        fields: Array.isArray(b.detail)
-          ? b.detail.map((d: any) => ({
-            path: d.loc,
-            message: String(d.msg ?? "").replaceAll(key, "[redacted]")
-              .replaceAll(bridge, "[redacted]"),
-          }))
-          : [],
-        message: String(b.detail?.message ?? "").replaceAll(key, "[redacted]")
-          .replaceAll(bridge, "[redacted]").slice(0, 800),
-        code: typeof b.detail?.status === "string"
-          ? b.detail.status
-          : "provider_error",
-      };
-    }
+    if (!r.ok) throw {
+      status: r.status,
+      fields: Array.isArray(b.detail) ? b.detail.map((d: any) => ({path: d.loc, message: String(d.msg ?? "").replaceAll(key, "[redacted]")})) : [],
+      message: String(b.detail?.message ?? "").replaceAll(key, "[redacted]").slice(0, 500),
+    };
     return b;
   }
   try {
     const operation = await req.json().catch(() => ({}));
-    if (env("ELEVENLABS_AGENT_ID") && operation.action !== "voices") {
-      const agentId = encodeURIComponent(env("ELEVENLABS_AGENT_ID"));
-      if (operation.action === "configure-audio") {
-        // General conversation uses balanced turn-taking. Keep all existing
-        // authentication, retention, voice and screened-LLM settings intact.
-        await api(`agents/${agentId}`, "PATCH", {
-          conversation_config: {
-            asr: { quality: "high", provider: "scribe_realtime" },
-            turn: {
-              turn_eagerness: "normal",
-              turn_timeout: 8,
-              soft_timeout_config: {
-                timeout_seconds: 2.5,
-                message: "Hmm, let me think.",
-                use_llm_generated_message: false,
-                max_soft_timeouts_per_generation: 1,
-                disable_until_first_user_message: true,
-              },
-            },
-            agent: { prompt: { cascade_timeout_seconds: 15 } },
-          },
-        });
-      }
-      const path = operation.action === "connection-test"
-        ? `conversation/get-signed-url?agent_id=${agentId}`
-        : `agents/${agentId}`;
-      const r = await fetch(`https://api.elevenlabs.io/v1/convai/${path}`, {
-        headers: { "xi-api-key": key },
-      });
-      const b = await r.json();
-      if (!r.ok) {
-        return reply({ error: "agent_read_failed", status: r.status }, 502);
-      }
-      if (operation.action === "connection-test") {
-        return reply({ signedUrl: b.signed_url });
-      }
-      return reply({
-        agentId: b.agent_id,
-        voiceId: b.conversation_config?.tts?.voice_id,
-        auth: b.platform_settings?.auth,
-        privacy: b.platform_settings?.privacy,
-        model: b.conversation_config?.agent?.prompt?.llm,
-        customLlmUrl: b.conversation_config?.agent?.prompt?.custom_llm?.url,
-        backup: b.conversation_config?.agent?.prompt?.backup_llm_config,
-        llmTimeout: b.conversation_config?.agent?.prompt?.cascade_timeout_seconds,
-        asr: b.conversation_config?.asr,
-        turn: b.conversation_config?.turn,
-        conversation: b.conversation_config?.conversation,
-        ttsModel: b.conversation_config?.tts?.model_id,
-        openaiModel: env("OPENAI_MODEL"),
-        overrides: b.platform_settings?.overrides,
-        configured: true,
-      });
-    }
-    if (operation.action === "voices") {
-      const r = await fetch("https://api.elevenlabs.io/v1/voices", {
-        headers: { "xi-api-key": key },
-      });
-      const b = await r.json();
-      return reply({
-        voices: (b.voices ?? []).filter((v: any) => v.category !== "cloned")
-          .map((v: any) => ({
-            id: v.voice_id,
-            name: v.name,
-            category: v.category,
-            labels: v.labels,
-          })).slice(0, 40),
-      });
-    }
-    const stored = await api("secrets", "POST", {
-      type: "new",
-      name: "AIRA screened OpenAI bridge",
-      value: bridge,
-    });
-    const settings = {
-      name: "AIRA App — screened OpenAI live companion",
-      conversation_config: {
-        agent: {
-          language: "en",
-          first_message: FIRST_GREETING,
-          disable_first_message_interruptions: false,
-          dynamic_variables: {
-            dynamic_variable_placeholders: { aira_name: "friend" },
-          },
-          prompt: {
-            prompt: FRIEND_PROMPT,
-            llm: "custom-llm",
-            ignore_default_personality: true,
-            max_tokens: 250,
-            custom_llm: {
-              url: `${
-                env("SUPABASE_URL")
-              }/functions/v1/aira-realtime/chat/completions`,
-              model_id: "aira-screened-openai",
-              api_type: "chat_completions",
-              api_key: { secret_id: stored.secret_id },
-            },
-            backup_llm_config: { preference: "disabled" },
-            cascade_timeout_seconds: 15,
-          },
-        },
-        asr: { quality: "high", provider: "scribe_realtime" },
-        tts: {
-          voice_id: env("ELEVENLABS_REALTIME_VOICE_ID") ||
-            env("ELEVENLABS_VOICE_ID"),
-          model_id: "eleven_flash_v2",
-        },
-        turn: {
-          turn_timeout: 8,
-          silence_end_call_timeout: 120,
-          turn_eagerness: "normal",
-          soft_timeout_config: {
-            timeout_seconds: 2.5,
-            message: "Hmm, let me think.",
-            use_llm_generated_message: false,
-            max_soft_timeouts_per_generation: 1,
-            disable_until_first_user_message: true,
-          },
-        },
-        conversation: {
-          max_duration_seconds: 900,
-          client_events: [
-            "audio",
-            "interruption",
-            "user_transcript",
-            "agent_response",
-            "agent_response_correction",
-          ],
-          file_input: { enabled: false },
-        },
-      },
-      platform_settings: {
-        auth: { enable_auth: true },
-        overrides: { custom_llm_extra_body: true },
-        privacy: {
-          record_voice: false,
-          retention_days: 0, // Scheduled deletion; not the provider's separate Zero Retention Mode.
-          delete_transcript_and_pii: true,
-          delete_audio: true,
-          zero_retention_mode: false,
-        },
-        call_limits: {
-          agent_concurrency_limit: 3,
-          daily_limit: 50,
-          bursting_enabled: false,
-        },
-        data_collection: {},
-        evaluation: { criteria: [] },
-      },
-    };
-    const result = await api("agents/create", "POST", settings);
+    let agentId = env("ELEVENLABS_AGENT_ID");
+    if (operation.action === "configure-native") {
+      const voiceId = env("ELEVENLABS_REALTIME_VOICE_ID");
+      if (!voiceId) return reply({error: "missing_voice"}, 503);
+      const settings = nativeAgentSettings(voiceId);
+      if (agentId) await api(`agents/${encodeURIComponent(agentId)}`, "PATCH", settings);
+      else agentId = (await api("agents/create", "POST", settings)).agent_id;
+    } else if (operation.action !== "inspect") return reply({error: "unsupported_action"}, 400);
+    if (!agentId) return reply({error: "missing_agent"}, 503);
+    const b = await api(`agents/${encodeURIComponent(agentId)}`);
     return reply({
-      agentId: result.agent_id,
-      secretId: stored.secret_id,
+      agentId: b.agent_id, name: b.name,
+      voiceId: b.conversation_config?.tts?.voice_id,
+      authEnabled: b.platform_settings?.auth?.enable_auth,
+      privacy: b.platform_settings?.privacy,
+      model: b.conversation_config?.agent?.prompt?.llm,
+      hasCustomLlm: !!b.conversation_config?.agent?.prompt?.custom_llm?.url,
+      backup: b.conversation_config?.agent?.prompt?.backup_llm_config,
+      firstMessage: b.conversation_config?.agent?.first_message,
+      dynamicVariableNames: Object.keys(b.conversation_config?.agent?.dynamic_variables?.dynamic_variable_placeholders ?? {}),
+      asr: b.conversation_config?.asr?.provider,
+      softTimeoutSeconds: b.conversation_config?.turn?.soft_timeout_config?.timeout_seconds,
+      ttsModel: b.conversation_config?.tts?.model_id,
       configured: true,
     });
-  } catch (e) {
-    // Only provider status and field paths are safe to expose; never echo request bodies/secrets.
-    const x = e as any;
-    return reply({
-      error: "setup_failed",
-      providerStatus: x.status ?? null,
-      message: x.message ?? "",
-      fields: x.fields ?? [],
-      code: x.code ?? "unknown",
-    }, 502);
+  } catch (error) {
+    const e = error as any;
+    return reply({error: "setup_failed", providerStatus: e.status ?? null, fields: e.fields ?? [], message: e.message ?? ""}, 502);
   }
 });

@@ -13,15 +13,30 @@ class FakeController extends AiraController {
   Completer<Map<String, dynamic>>? startResult;
   Completer<void>? consentResult;
   String? sentFeeling;
+  final archives = <Map<String, dynamic>>[];
+  Completer<void>? archiveResult;
+  @override
+  Future<void> saveCallTranscript(
+    String providerId,
+    List<Map<String, dynamic>> entries, {
+    String? conversationId,
+    int? expectedSession,
+  }) async {
+    archives.add({
+      'provider': providerId,
+      'conversationId': conversationId,
+      'entries': List<Map<String, dynamic>>.from(entries),
+    });
+    await archiveResult?.future;
+  }
+
   Map<String, dynamic>? sentCue;
   @override
   Future<Map<String, dynamic>> beginRealtimeCall(String mode) async {
     starts++;
+    activeCallId = 'app-call-$starts';
     return startResult == null
-        ? {
-            'conversationToken': 'test',
-            'customLlmExtraBody': {'aira_session_token': 'signed-test'},
-          }
+        ? {'conversationToken': 'test'}
         : startResult!.future;
   }
 
@@ -38,6 +53,7 @@ class FakeController extends AiraController {
   @override
   Future<void> endCall() async {
     ends++;
+    activeCallId = '';
   }
 
   @override
@@ -322,7 +338,7 @@ void main() {
       await tester.tap(find.text('Sad'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 250));
-      expect(controller.sentFeeling, 'Sad');
+      expect(controller.sentFeeling, 'sad');
       expect(controller.sentCue?['label'], 'happy');
       expect(find.text('AI-estimated emotion: Happy'), findsNWidgets(2));
       expect(find.textContaining('You said: Sad'), findsOneWidget);
@@ -338,7 +354,7 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(controller.sentCue, isNull);
-      expect(controller.sentFeeling, 'Sad');
+      expect(controller.sentFeeling, 'sad');
       await closeTree(tester);
     },
   );
@@ -463,6 +479,35 @@ void main() {
     expect(character.center.dx, closeTo(450, 1));
     expect(camera.left, greaterThan(character.right));
     expect(camera.right, lessThanOrEqualTo(900));
+    await closeTree(tester);
+  });
+  testWidgets('hangup releases texting before transcript saving completes', (
+    tester,
+  ) async {
+    final media = FakeMedia(), controller = FakeController();
+    await openCall(tester, controller, media);
+    controller.archiveResult = Completer<void>();
+    media.update(
+      const AiraMediaState(
+        realtimeStatus: 'connected',
+        voiceConversationId: 'provider-call-1',
+        callTranscript: [
+          {'role': 'user', 'text': 'Hello', 'timeInCallSecs': 1},
+          {'role': 'assistant', 'text': 'Hey there!', 'timeInCallSecs': 2},
+        ],
+      ),
+    );
+    await tester.pump();
+    expect(controller.archives, hasLength(1));
+    await tester.tap(find.text('End call'));
+    await tester.pump();
+    expect(controller.ends, 1);
+    expect(controller.activeCallId, isEmpty);
+    controller.archiveResult!.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(controller.archives.last['conversationId'], 'app-call-1');
+    expect(controller.archives.last['entries'], hasLength(2));
     await closeTree(tester);
   });
 }

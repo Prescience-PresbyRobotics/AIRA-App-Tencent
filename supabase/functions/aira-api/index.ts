@@ -26,8 +26,9 @@ import {
   callContext,
   conversationToken,
   realtimeConfigured,
-  signCall,
 } from "../_shared/realtime.ts";
+import { handleCallArchives } from "../_shared/native_calls.ts";
+import { handleCallSchedule } from "../_shared/call_schedule.ts";
 const consentAliases: Record<string, string> = {
   store_conversations: "conversation_storage",
   memory_enabled: "memory",
@@ -400,8 +401,12 @@ export function createHandler(
           selfReportedFeeling = b.selfReportedFeeling.toLowerCase();
         }
         const mode = b.mode ?? "text";
-        if (!["text", "voice", "video"].includes(mode)) {
-          throw new ApiError(400, "invalid_mode", "Invalid conversation mode.");
+        if (mode !== "text") {
+          throw new ApiError(
+            400,
+            "native_call_required",
+            "Voice and video conversations use live ElevenLabs calls. Please refresh AIRA.",
+          );
         }
         const reserved = await db.rpc("aira_reserve_message", {
           p_user: user,
@@ -837,6 +842,20 @@ export function createHandler(
           }),
         });
       }
+      const scheduled = await handleCallSchedule(path, method, req, {
+        db,
+        user,
+        profile: p,
+      });
+      if (scheduled) return respond(scheduled.body, scheduled.status ?? 200);
+      const archived = await handleCallArchives(path, method, req, {
+        db,
+        user,
+        profile: p,
+        get,
+        fetcher,
+      });
+      if (archived) return respond(archived.body, archived.status ?? 200);
       if (path === "/v1/calls/session" && method === "POST") {
         if (!realtimeConfigured(get)) {
           throw new ApiError(
@@ -851,11 +870,17 @@ export function createHandler(
         }
         let reservation;
         try {
-          reservation = await db.rpc("aira_reserve_call", {
-            p_user: user,
-            p_mode: b.mode,
-            p_consent_version: p.consent_version,
-          });
+          reservation = await db.rpc(
+            b.invitationId
+              ? "aira_reserve_scheduled_call"
+              : "aira_reserve_call",
+            {
+              ...(b.invitationId ? { p_invitation: uuid(b.invitationId) } : {}),
+              p_user: user,
+              p_mode: b.mode,
+              p_consent_version: p.consent_version,
+            },
+          );
         } catch (e) {
           if (e instanceof ApiError && e.code === "rate_limited") {
             throw new ApiError(
@@ -873,15 +898,16 @@ export function createHandler(
           return respond({
             conversationId: conversation.id,
             conversationToken: token,
-            customLlmExtraBody: {
-              aira_session_token: await signCall({
-                user,
-                conversation: conversation.id,
-                version: session.consent_version,
-                expires,
-              }, get("AIRA_CALL_SIGNING_SECRET")),
+            dynamicVariables: {
+              aira_name: p.display_name || "friend",
+              aira_call_id: conversation.id,
+              aira_call_binding: reservation.callBinding,
+              aira_greeting: b.invitationId
+                ? `Hey ${
+                  p.display_name || "there"
+                }! It's Aira. I was looking forward to our catch-up. How's your day going?`
+                : FIRST_GREETING,
             },
-            dynamicVariables: { aira_name: p.display_name || "friend" },
             expiresAt: new Date(expires).toISOString(),
           }, 201);
         } catch (e) {

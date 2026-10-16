@@ -20,6 +20,10 @@ external void _setSpeakerMuted(JSBoolean muted);
 external JSPromise<JSAny?> _refreshMicrophones();
 @JS('airaMedia.changeMicrophone')
 external JSPromise<JSAny?> _changeMicrophone(JSString id);
+@JS('airaMedia.clearCallTranscript')
+external void _clearCallTranscript();
+@JS('airaMedia.sendCallContext')
+external void _sendCallContext(JSString text);
 @JS('airaMedia.snapshot')
 external JSString _snapshot();
 @JS('airaMedia.attachPreview')
@@ -42,6 +46,23 @@ external JSPromise<JSAny?> _playAudio(JSString base64, JSString mimeType);
 external void _stopPlayback();
 @JS('airaMedia.stopAll')
 external void _stopAll();
+
+@JS('airaMedia.startIncomingRingtone')
+external JSPromise<JSAny?> _startIncomingRingtone();
+@JS('airaMedia.stopIncomingRingtone')
+external void _stopIncomingRingtone();
+
+Future<void> startIncomingRingtone() async {
+  try {
+    await _startIncomingRingtone().toDart;
+  } catch (_) {
+    /* Browser autoplay may block sound. */
+  }
+}
+
+void stopIncomingRingtone() {
+  _stopIncomingRingtone();
+}
 
 class AiraMediaController extends ChangeNotifier {
   AiraMediaController() {
@@ -86,6 +107,15 @@ class AiraMediaController extends ChangeNotifier {
     ) as Map<String, dynamic>;
     _refresh();
     if (result['error'] != null) throw StateError(result['error'] as String);
+  }
+
+  void clearCallTranscript() {
+    _clearCallTranscript();
+    _refresh();
+  }
+
+  void sendCallContext(String text) {
+    if (!_disposed) _sendCallContext(text.toJS);
   }
 
   void setMicMuted(bool muted) {

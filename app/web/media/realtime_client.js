@@ -7,7 +7,7 @@
     realtimeError: null, realtimeConnectedAt: null, speakerMuted: false,
     inputLevel: 0, outputLevel: 0, awaitingReply: false, microphoneIssue: null,
     microphoneName: null, selectedMicrophoneId: null, availableMicrophones: [],
-    changingMicrophone: false};
+    changingMicrophone: false, callTranscript: []};
   let sdkPromise, session, pendingStart, pendingEnd, guard;
   let epoch = 0;
   let deviceChangeListener, microphoneSelectionError;
@@ -88,7 +88,7 @@
       state.inputLevel = session && !state.micMuted ? level(session.getInputVolume()) : 0;
       state.outputLevel = session && !state.speakerMuted ? level(session.getOutputVolume()) : 0;
     } catch (_) { state.inputLevel = 0; state.outputLevel = 0; }
-    return {...state, availableMicrophones: state.availableMicrophones.map(device => ({...device}))};
+    return {...state, callTranscript: state.callTranscript.map(entry => ({...entry})), availableMicrophones: state.availableMicrophones.map(device => ({...device}))};
   }
   async function refreshMicrophones() {
     // Enumeration never requests permission. Labels appear only after the
@@ -143,8 +143,9 @@
     if (deviceChangeListener) navigator.mediaDevices?.removeEventListener?.('devicechange', deviceChangeListener);
     deviceChangeListener = null;
     state.realtimeConnectedAt = null;
-    state.voiceConversationId = null;
-    // Captions are session-only and disappear when the call ends.
+    // Keep the completed transcript in memory until Flutter archives it.
+    // It is cleared explicitly after handoff or on the next call.
+    // On-screen captions disappear when the call ends.
     state.userCaption = null; state.agentCaption = null;
     if (active) {
       try { active.setVolume({volume: 0}); active.setMicMuted(true); } catch (_) {}
@@ -158,6 +159,7 @@
     if (state.realtimeStatus === 'connected' || state.realtimeStatus === 'connecting') throw new Error('A call is already active.');
     if (pendingStart) throw new Error('The previous connection is still closing. Please try again shortly.');
     const request = ++epoch;
+    state.voiceConversationId = null; state.callTranscript = [];
     state.realtimeError = null;
     state.realtimeStatus = 'loading';
     state.micMuted = false;
@@ -169,8 +171,7 @@
       await prepare();
       if (cancelled(request)) return;
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw new Error('Microphone needs HTTPS.');
-      if (typeof config.conversationToken !== 'string' || !config.conversationToken ||
-          typeof config.customLlmExtraBody?.aira_session_token !== 'string') throw new Error('The secure call session was not available.');
+      if (typeof config.conversationToken !== 'string' || !config.conversationToken) throw new Error('The secure call session was not available.');
       const owner = captureGuard(request);
       state.realtimeStatus = 'connecting';
       let created;
@@ -181,7 +182,6 @@
         // fail before capture on WebKit with an unsupported setConfiguration.
         // Use the SDK's supported dual-PC compatibility path (ElevenLabs #960).
         webRtc: {singlePeerConnection: false},
-        customLlmExtraBody: {aira_session_token: config.customLlmExtraBody.aira_session_token},
         dynamicVariables: config.dynamicVariables || {},
         useWakeLock: false,
         // Let the app's explicit background policy end the call. Never reconnect
@@ -207,11 +207,20 @@
           const text = message.slice(0, 6000);
           if (role === 'user' || source === 'user') { state.userCaption = text; state.awaitingReply = true; }
           else if (role === 'agent' || source === 'ai') { state.agentCaption = text; state.awaitingReply = false; }
+          else return;
+          const speaker = role === 'user' || source === 'user' ? 'user' : 'assistant';
+          const last = state.callTranscript.at(-1);
+          if (text.trim() && !(last?.role === speaker && last?.text === text)) {
+            state.callTranscript.push({role: speaker, text, timeInCallSecs: Math.max(0, Math.floor((Date.now() - (state.realtimeConnectedAt || Date.now())) / 1000))});
+            if (state.callTranscript.length > 500) state.callTranscript.shift();
+          }
         },
         onInterruption: () => { if (!cancelled(request)) state.callMode = 'listening'; },
         onAgentResponseCorrection: event => {
           if (!cancelled(request) && typeof event?.corrected_agent_response === 'string') {
             state.agentCaption = event.corrected_agent_response.slice(0, 6000);
+            const last = state.callTranscript.findLast(entry => entry.role === 'assistant');
+            if (last) last.text = state.agentCaption;
           }
         },
         onDisconnect: details => {
@@ -279,6 +288,12 @@
     // handled by ElevenLabs VAD/interruption events and the WebRTC SDK itself.
     session.sendUserActivity();
   }
+  function clearTranscript() { state.callTranscript = []; state.voiceConversationId = null; }
+  function contextualUpdate(text) {
+    if (session && state.realtimeStatus === 'connected' && typeof text === 'string') {
+      session.sendContextualUpdate(text.slice(0, 1000));
+    }
+  }
   window.airaRealtime = Object.freeze({prepare, start, stop, mute, speakerMute, interrupt,
-    refreshMicrophones, changeMicrophone, snapshot});
+    refreshMicrophones, changeMicrophone, clearTranscript, contextualUpdate, snapshot});
 })();

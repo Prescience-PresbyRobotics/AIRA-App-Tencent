@@ -361,7 +361,7 @@
     if (window.airaRealtime) return window.airaRealtime.prepare();
     if (!realtimeModule) realtimeModule = new Promise((resolve, reject) => {
       const script = document.createElement('script');
-      script.src = new URL('realtime_client.js?v=20261016b', base).href;
+      script.src = new URL('realtime_client.js?v=20261016c', base).href;
       script.onload = resolve;
       script.onerror = () => { realtimeModule = null; script.remove(); reject(new Error('Voice software could not load.')); };
       document.head.appendChild(script);
@@ -386,8 +386,40 @@
   function setSpeakerMuted(value) { window.airaRealtime?.speakerMute(value); }
   async function refreshMicrophones() { await window.airaRealtime?.refreshMicrophones(); }
   async function changeMicrophone(id) { await window.airaRealtime?.changeMicrophone(id); }
+  let ringtoneContext, ringtoneTimer;
+  function stopIncomingRingtone() {
+    clearInterval(ringtoneTimer); ringtoneTimer = null;
+    const audio = ringtoneContext; ringtoneContext = null;
+    if (audio) void audio.close().catch(() => {});
+  }
+  async function startIncomingRingtone() {
+    stopIncomingRingtone();
+    if (document.hidden) return;
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    if (!Audio) return;
+    const audio = new Audio(); ringtoneContext = audio;
+    try {
+      await audio.resume();
+      if (ringtoneContext !== audio || document.hidden || audio.state !== 'running') return;
+      const ring = () => {
+        if (ringtoneContext !== audio || document.hidden) { stopIncomingRingtone(); return; }
+        for (const offset of [0, .3]) {
+          const oscillator = audio.createOscillator(), gain = audio.createGain();
+          oscillator.type = 'sine'; oscillator.frequency.value = 660;
+          const at = audio.currentTime + offset;
+          gain.gain.setValueAtTime(0, at);
+          gain.gain.linearRampToValueAtTime(.035, at + .025);
+          gain.gain.linearRampToValueAtTime(0, at + .22);
+          oscillator.connect(gain); gain.connect(audio.destination);
+          oscillator.start(at); oscillator.stop(at + .23);
+          oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+        }
+      };
+      ring(); ringtoneTimer = setInterval(ring, 2400);
+    } catch (_) { if (ringtoneContext === audio) stopIncomingRingtone(); }
+  }
   function stopAll() {
-    stopRealtime(); stopCamera(); cancelRecording(); stopPlayback();
+    stopIncomingRingtone(); stopRealtime(); stopCamera(); cancelRecording(); stopPlayback();
   }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
@@ -398,6 +430,9 @@
   window.addEventListener('pagehide', stopAll);
   window.addEventListener('offline', () => { stopAll(); state.suspended = true; state.error = 'The call was interrupted. Please reconnect and start again.'; });
   window.airaMedia = Object.freeze({
+    startIncomingRingtone, stopIncomingRingtone,
+    clearCallTranscript: () => window.airaRealtime?.clearTranscript(),
+    sendCallContext: text => window.airaRealtime?.contextualUpdate(text),
     snapshot: () => {
       const realtime = window.airaRealtime?.snapshot();
       return JSON.stringify({...state, ...realtime,

@@ -50,6 +50,8 @@ class AiraMediaState {
     this.agentCaption,
     this.realtimeError,
     this.realtimeConnectedAt,
+    this.voiceConversationId,
+    this.callTranscript = const [],
   });
   final String camera, microphone, detection;
   final String realtimeStatus, callMode;
@@ -59,6 +61,8 @@ class AiraMediaState {
   final List<AudioInputDevice> availableMicrophones;
   final String? userCaption, agentCaption, realtimeError;
   final DateTime? realtimeConnectedAt;
+  final String? voiceConversationId;
+  final List<Map<String, dynamic>> callTranscript;
   bool get connected => realtimeStatus == 'connected';
   final bool detectionEnabled, playing, suspended;
   final String? emotion, reason, error;
@@ -91,6 +95,11 @@ class AiraMediaState {
     availableMicrophones: (json['availableMicrophones'] as List? ?? [])
         .whereType<Map<String, dynamic>>()
         .map(AudioInputDevice.fromJson)
+        .toList(),
+    voiceConversationId: json['voiceConversationId'] as String?,
+    callTranscript: (json['callTranscript'] as List? ?? [])
+        .whereType<Map<String, dynamic>>()
+        .map((entry) => Map<String, dynamic>.from(entry))
         .toList(),
     userCaption: json['userCaption'] as String?,
     agentCaption: json['agentCaption'] as String?,

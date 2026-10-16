@@ -2,8 +2,9 @@
 """Opt-in live test of AIRA Auth, screened OpenAI text, ElevenLabs TTS and STT.
 
 Without --run this only validates local configuration and prints the plan. A live
-run creates a synthetic, preconfirmed Auth account without sending email, keeps
-all optional consents off, and deletes that account in finally. Provider keys
+run creates a synthetic, preconfirmed Auth account without sending email,
+verifies new-account feature defaults then turns optional consents off before
+provider testing, and deletes that account in finally. Provider keys
 are never read. Supabase keys, tokens, audio and text stay in process memory.
 The ordinary run makes one app message (normally three OpenAI requests), one TTS
 request and one STT request, which incur the providers' normal usage charges.
@@ -151,12 +152,28 @@ class LiveSmoke:
         _, me, _, _ = self.app("GET", "/me", "Authenticated profile")
         profile = me.get("profile", {})
         require(profile.get("id") == self.run_id, "Profile does not belong to the synthetic account.")
+        consent_names = {
+            "conversation_storage", "memory", "social_reminders", "medication_reminders",
+            "monitoring", "impact", "mood_history", "face_cues", "urgent_sharing",
+            "reviewed_sharing", "admin_insights",
+        }
         require(isinstance(profile.get("consents"), dict)
-                and all(value is False for value in profile["consents"].values()),
-                "Synthetic account has unexpected enabled consents.")
+                and set(profile["consents"]) == consent_names
+                and all(value is True for value in profile["consents"].values()),
+                "Synthetic account does not have the configured new-account defaults.")
         require(me.get("roles") == [], "Synthetic account has unexpected staff assignments.")
         self.app("GET", "/admin/overview", "Staff access denial", expected=(403,))
         print("PASS: password sign-in, account profile, consent defaults and staff access denial.", flush=True)
+        _, updated, _, _ = self.app("PATCH", "/preferences", "Disable synthetic account optional features", {
+            "consents": {name: False for name in sorted(consent_names)},
+        })
+        profile = updated.get("profile", {})
+        require(profile.get("id") == self.run_id
+                and isinstance(profile.get("consents"), dict)
+                and set(profile["consents"]) == consent_names
+                and all(value is False for value in profile["consents"].values()),
+                "Synthetic optional features were not disabled before provider testing.")
+        print("PASS: synthetic optional features disabled before provider testing.", flush=True)
         capabilities = me.get("capabilities", {})
         require(capabilities.get("text") is True,
                 "Text is not configured: check OPENAI_API_KEY and OPENAI_MODEL in Edge secrets.")

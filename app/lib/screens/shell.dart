@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../controller.dart';
+import '../media/aira_media.dart';
 import '../theme.dart';
 import '../widgets/ui.dart';
 import '../widgets/companion.dart';
@@ -10,6 +11,7 @@ import 'chat.dart';
 import 'personal.dart';
 import 'settings.dart';
 import 'dashboard.dart';
+import 'call.dart';
 
 class AiraShell extends StatefulWidget {
   final AiraController controller;
@@ -22,16 +24,53 @@ class AiraShell extends StatefulWidget {
 class _ShellState extends State<AiraShell> with WidgetsBindingObserver {
   Timer? _timer;
   bool _polling = false, _active = true, _responding = false;
+  bool _showingIncoming = false;
+  String? _shownInvitation;
   Future<void> _poll() async {
     if (!_active || _polling || !mounted || widget.controller.preview) return;
     _polling = true;
     try {
-      await widget.controller.pollEvents();
+      await Future.wait([
+        widget.controller.pollEvents(),
+        widget.controller.refreshCallSchedule(),
+      ]);
     } catch (_) {
       /* Retry only while visible. No delivery claim on network failure. */
     } finally {
       _polling = false;
+      if (mounted && _active) unawaited(_showIncomingCall());
     }
+  }
+
+  Future<void> _showIncomingCall() async {
+    final ctl = widget.controller;
+    final invitation = ctl.incomingCall;
+    if (_showingIncoming ||
+        invitation == null ||
+        ctl.callBusy ||
+        invitation['id'] == _shownInvitation ||
+        !mounted) {
+      return;
+    }
+    final expires = DateTime.tryParse(
+      invitation['expiresAt']?.toString() ?? '',
+    );
+    if (expires == null || !expires.isAfter(DateTime.now())) return;
+    _shownInvitation = invitation['id']?.toString();
+    _showingIncoming = true;
+    final accepted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) =>
+          _IncomingCallDialog(controller: ctl, invitation: invitation),
+    );
+    _showingIncoming = false;
+    if (!mounted || accepted != true || !ctl.signedIn) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CallScreen(controller: ctl, video: false),
+      ),
+    );
   }
 
   @override
@@ -340,6 +379,220 @@ class _ShellState extends State<AiraShell> with WidgetsBindingObserver {
               ),
             ),
           ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _IncomingCallDialog extends StatefulWidget {
+  const _IncomingCallDialog({
+    required this.controller,
+    required this.invitation,
+  });
+  final AiraController controller;
+  final Map<String, dynamic> invitation;
+  @override
+  State<_IncomingCallDialog> createState() => _IncomingCallState();
+}
+
+class _IncomingCallState extends State<_IncomingCallDialog>
+    with WidgetsBindingObserver {
+  Timer? timer;
+  bool busy = false, ringEnabled = true, active = true, closing = false;
+  String? error;
+  late final int session;
+  @override
+  void initState() {
+    super.initState();
+    session = widget.controller.sessionEpoch;
+    WidgetsBinding.instance.addObserver(this);
+    widget.controller.addListener(_accountOrInvitationChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _ring());
+    timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || closing) return;
+      final expiration = DateTime.tryParse(
+        widget.invitation['expiresAt']?.toString() ?? '',
+      );
+      if (expiration == null || !expiration.isAfter(DateTime.now())) {
+        stopIncomingRingtone();
+        if (!busy) _close(false);
+      }
+    });
+  }
+
+  Future<void> _ring() async {
+    if (!mounted || closing || !active || !ringEnabled || busy) return;
+    final expiration = DateTime.tryParse(
+      widget.invitation['expiresAt']?.toString() ?? '',
+    );
+    if (expiration == null || !expiration.isAfter(DateTime.now())) {
+      _close(false);
+      return;
+    }
+    try {
+      // Autoplay restrictions can keep an incoming call silent. The visible
+      // invitation is always available, and this never opens a microphone.
+      await startIncomingRingtone();
+    } catch (_) {
+      // A silent ring does not stop the user accepting or declining the call.
+    }
+    if (!mounted || closing || !active || !ringEnabled || busy) {
+      stopIncomingRingtone();
+    }
+  }
+
+  void _accountOrInvitationChanged() {
+    if (!mounted || closing) return;
+    final changed = widget.controller.sessionEpoch != session;
+    final stillIncoming =
+        widget.controller.incomingCall?['id'] == widget.invitation['id'];
+    if (changed || !stillIncoming) {
+      stopIncomingRingtone();
+      if (changed || !busy) _close(false);
+    }
+  }
+
+  void _close(bool accepted) {
+    if (!mounted || closing) return;
+    closing = true;
+    stopIncomingRingtone();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop(accepted);
+    });
+    // A polling callback can arrive outside a frame.
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    active = state == AppLifecycleState.resumed;
+    if (active) {
+      unawaited(_ring());
+    } else {
+      stopIncomingRingtone();
+    }
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    stopIncomingRingtone();
+    widget.controller.removeListener(_accountOrInvitationChanged);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> respond(String action) async {
+    stopIncomingRingtone();
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final accepted = await widget.controller.respondScheduledCall(
+        widget.invitation,
+        action,
+      );
+      if (mounted) _close(accepted);
+    } catch (e) {
+      if (mounted) setState(() => error = AiraController.cleanError(e));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+    canPop: false,
+    child: Dialog(
+      backgroundColor: const Color(0xFF173B31),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Incoming voice call',
+                style: TextStyle(color: Colors.white70, fontSize: 16),
+              ),
+              const AiraGap(height: 16),
+              const Text(
+                'AIRA',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 32,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const AiraGap(height: 12),
+              const Companion(size: 160, activity: CompanionActivity.greeting),
+              const AiraGap(height: 12),
+              const Text(
+                'A little time together?',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white, fontSize: 20),
+              ),
+              const AiraGap(height: 8),
+              const Text(
+                'Your microphone starts only after you accept.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+              TextButton.icon(
+                style: TextButton.styleFrom(foregroundColor: Colors.white70),
+                onPressed: busy
+                    ? null
+                    : () {
+                        setState(() => ringEnabled = !ringEnabled);
+                        if (ringEnabled) {
+                          unawaited(_ring());
+                        } else {
+                          stopIncomingRingtone();
+                        }
+                      },
+                icon: Icon(
+                  ringEnabled
+                      ? Icons.volume_off_outlined
+                      : Icons.volume_up_outlined,
+                ),
+                label: Text(ringEnabled ? 'Silence ring' : 'Enable ring'),
+              ),
+              if (error != null) ...[
+                const AiraGap(height: 12),
+                Text(error!, style: const TextStyle(color: Color(0xFFFFD4A4))),
+              ],
+              const AiraGap(height: 28),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 24,
+                runSpacing: 12,
+                children: [
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFD7535F),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: busy ? null : () => respond('decline'),
+                    icon: const Icon(Icons.call_end_rounded),
+                    label: const Text('Decline'),
+                  ),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFC9E9CD),
+                      foregroundColor: const Color(0xFF153A2D),
+                    ),
+                    onPressed: busy ? null : () => respond('accept'),
+                    icon: const Icon(Icons.call_rounded),
+                    label: Text(busy ? 'Connecting…' : 'Accept'),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     ),

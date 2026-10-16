@@ -23,9 +23,7 @@ Widget screen(AiraController controller, Widget child, {double scale = 1}) =>
     );
 
 void main() {
-  testWidgets('public auth hides the forgot-password entry', (
-    tester,
-  ) async {
+  testWidgets('public auth hides the forgot-password entry', (tester) async {
     final controller = AiraController(null);
     addTearDown(controller.dispose);
     await tester.pumpWidget(
@@ -106,8 +104,8 @@ void main() {
       await tester.pumpAndSettle();
     }
     expect(
-      controller.preferences.values.any((value) => value == true),
-      isFalse,
+      controller.preferences.values.every((value) => value == true),
+      isTrue,
     );
   });
 
@@ -123,22 +121,22 @@ void main() {
         ),
       );
       expect(find.byType(SwitchListTile), findsNothing);
-      expect(find.byType(AiraSummaryCard), findsNWidgets(5));
+      expect(find.byType(AiraSummaryCard), findsNWidgets(7));
       expect(find.text('Save conversations'), findsNothing);
       await tester.tap(find.text('Privacy & memory'));
       await tester.pumpAndSettle();
       expect(find.byType(SwitchListTile), findsNWidgets(4));
-      expect(controller.consent('memory_enabled'), isFalse);
+      expect(controller.consent('memory_enabled'), isTrue);
       await tester.tap(find.text('Saved memories'));
       await tester.pumpAndSettle();
-      expect(controller.consent('memory_enabled'), isTrue);
-      expect(controller.consent('store_conversations'), isFalse);
+      expect(controller.consent('memory_enabled'), isFalse);
+      expect(controller.consent('store_conversations'), isTrue);
       await tester.pageBack();
       await tester.pumpAndSettle();
       await tester.tap(find.text('Reminders'));
       await tester.pumpAndSettle();
       expect(find.byType(SwitchListTile), findsNWidgets(2));
-      expect(controller.consent('medication_reminders'), isFalse);
+      expect(controller.consent('medication_reminders'), isTrue);
     },
   );
 

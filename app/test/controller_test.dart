@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:aira/controller.dart';
 import 'package:aira/services/aira_api.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class RecordedRequest {
@@ -682,4 +683,162 @@ void main() {
       expect(controller.outbox, isEmpty);
     },
   );
+  test(
+    'main chat and model context exclude voice and video transcripts',
+    () async {
+      controller.messages = [
+        ChatTurn(text: 'Text message', fromAira: false),
+        ChatTurn(
+          text: 'Private spoken message',
+          fromAira: false,
+          mode: 'voice',
+        ),
+        ChatTurn(text: 'Video reply', fromAira: true, mode: 'video'),
+      ];
+      expect(controller.visibleMessages.map((turn) => turn.text), [
+        'Text message',
+      ]);
+      api.respond = (_) async => approvedReply('Text reply');
+      await controller.send('New text');
+      expect(api.calls.last.data!['context'], [
+        {'role': 'user', 'text': 'Text message'},
+      ]);
+      expect(controller.visibleMessages.map((turn) => turn.text), [
+        'Text message',
+        'New text',
+        'Text reply',
+      ]);
+    },
+  );
+
+  test(
+    'call archive pagination stays separate and clears with storage opt-out',
+    () async {
+      controller.preferences['store_conversations'] = true;
+      api.respond = (request) async {
+        if (request.method == 'PATCH') {
+          return {
+            'profile': {'consent_version': 2},
+          };
+        }
+        return {
+          'calls': [
+            {
+              'id': request.path.contains('?') ? 'older' : 'latest',
+              'mode': 'voice',
+            },
+          ],
+          'nextCursor': request.path.contains('?') ? null : 'previous',
+          'privacyVersion': 1,
+        };
+      };
+      await controller.refreshCallHistory();
+      await controller.refreshCallHistory(older: true);
+      expect(controller.callHistory.map((call) => call['id']), [
+        'latest',
+        'older',
+      ]);
+      expect(controller.messages, isEmpty);
+      await controller.updatePreference('store_conversations', false);
+      expect(controller.callHistory, isEmpty);
+      expect(controller.callHistoryCursor, isNull);
+    },
+  );
+
+  test('delayed call archive cannot restore another account data', () async {
+    controller.preferences['store_conversations'] = true;
+    final result = Completer<Map<String, dynamic>>();
+    api.respond = (_) => result.future;
+    final pending = controller.refreshCallHistory();
+    controller.startPreview();
+    result.complete({
+      'calls': [
+        {'id': 'private', 'mode': 'video'},
+      ],
+      'privacyVersion': 1,
+    });
+    await pending;
+    expect(controller.callHistory, isEmpty);
+    expect(controller.callHistoryLoading, isFalse);
+  });
+
+  test(
+    'call transcript upload is pinned to its captured account session',
+    () async {
+      final oldSession = controller.sessionEpoch;
+      controller.startPreview();
+      await controller.saveCallTranscript(
+        'provider-id',
+        [
+          {'role': 'user', 'text': 'Old account'},
+        ],
+        conversationId: 'old-call',
+        expectedSession: oldSession,
+      );
+      expect(api.calls, isEmpty);
+    },
+  );
+
+  test('scheduled call accept is claimed before native call start', () async {
+    api.respond = (request) async {
+      if (request.path == '/scheduled-calls/incoming/respond') {
+        return {'startCall': true};
+      }
+      if (request.path == '/calls/session') {
+        return {'conversationId': 'new-call', 'conversationToken': 'token'};
+      }
+      throw StateError('Unexpected path');
+    };
+    final accepted = await controller.respondScheduledCall({
+      'id': 'incoming',
+      'version': 3,
+    }, 'accept');
+    expect(accepted, isTrue);
+    expect(controller.activeCallId, isEmpty);
+    await controller.beginRealtimeCall('voice');
+    expect(api.calls.last.data, {'mode': 'voice', 'invitationId': 'incoming'});
+    expect(controller.pendingScheduledCallId, isNull);
+    expect(controller.activeCallId, 'new-call');
+  });
+
+  test(
+    'decline and already claimed scheduled calls never start a call',
+    () async {
+      api.respond = (_) async => {'startCall': false};
+      for (final action in ['decline', 'accept']) {
+        expect(
+          await controller.respondScheduledCall({
+            'id': 'incoming',
+            'version': 1,
+          }, action),
+          isFalse,
+        );
+        expect(controller.pendingScheduledCallId, isNull);
+        expect(controller.activeCallId, isEmpty);
+      }
+    },
+  );
+
+  test('call schedule persists explicit time and expected revision', () async {
+    api.respond = (request) async => {
+      'schedule': {...?request.data, 'version': 2},
+    };
+    controller.callSchedule = {
+      'localTime': '18:00',
+      'version': 1,
+      'enabled': true,
+    };
+    await controller.saveCallSchedule(const TimeOfDay(hour: 9, minute: 30));
+    expect(api.calls.last.data, {
+      'localTime': '09:30',
+      'timeZone': 'Asia/Singapore',
+      'enabled': true,
+      'expectedVersion': 1,
+    });
+    expect(controller.callSchedule!['version'], 2);
+    await controller.deleteCallSchedule();
+    expect(api.calls.last.method, 'DELETE');
+    expect(api.calls.last.data, {'expectedVersion': 2});
+    expect(controller.callSchedule, isNull);
+  });
 }

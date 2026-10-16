@@ -54,13 +54,13 @@ function harness({latePermission=false, lateConnect=false, denied=null}={}) {
     setLevels:(a,b)=>{input=a;output=b;},get switchOptions(){return switchOptions;},
     get options(){return options;},get requests(){return requests;},get ends(){return ends;},get muted(){return muted;},get volume(){return volume;}};
 }
-const config={conversationToken:'test-token',customLlmExtraBody:{aira_session_token:'signed-test-session'},dynamicVariables:{aira_name:'Friend'}};
+const config={conversationToken:'test-token',dynamicVariables:{aira_name:'Friend'}};
 (async()=>{
   const h=harness(); await h.api.prepare(); assert.equal(h.requests,0,'preload must not ask for a microphone');
   await h.api.start(config);
   assert.equal(h.options.connectionType,'webrtc');
   assert.equal(h.options.webRtc.singlePeerConnection,false,'use supported WebKit-compatible dual-PC negotiation');
-  assert.equal(h.options.customLlmExtraBody.aira_session_token,'signed-test-session');
+  assert.equal(h.options.customLlmExtraBody,undefined,'native agent never receives an OpenAI bridge payload');
   assert.equal(h.options.useWakeLock,false);
   assert.equal(h.api.snapshot().realtimeStatus,'connected');
   assert.ok(h.api.snapshot().realtimeConnectedAt);
@@ -79,6 +79,9 @@ const config={conversationToken:'test-token',customLlmExtraBody:{aira_session_to
   assert.equal(h.api.snapshot().awaitingReply,false);
   assert.equal(h.api.snapshot().userCaption,'How are you?');
   assert.equal(h.api.snapshot().agentCaption,'I am here.');
+  h.options.onAgentResponseCorrection({corrected_agent_response:'I am here with you.'});
+  assert.equal(h.api.snapshot().callTranscript.length,2);
+  assert.equal(h.api.snapshot().callTranscript[1].text,'I am here with you.');
   h.options.onModeChange({mode:'speaking'}); assert.equal(h.api.snapshot().callMode,'speaking');
   h.api.mute(true); assert.equal(h.track.enabled,false);assert.equal(h.muted,true);
   assert.equal(h.api.snapshot().inputLevel,0);assert.equal(h.api.snapshot().microphoneIssue,null);
@@ -99,6 +102,10 @@ const config={conversationToken:'test-token',customLlmExtraBody:{aira_session_to
   h.api.stop(); assert.equal(h.alternate.stopped,true); assert.equal(h.volume,0);
   assert.equal(h.api.snapshot().availableMicrophones.length,0,'End clears device labels');
   assert.equal(h.api.snapshot().agentCaption,null,'End clears transient captions');
+  assert.equal(h.api.snapshot().callTranscript.length,2,'End preserves final captions for archive handoff');
+  assert.equal(h.api.snapshot().voiceConversationId,'provider-conversation');
+  h.api.clearTranscript(); assert.equal(h.api.snapshot().callTranscript.length,0);
+  assert.equal(h.api.snapshot().voiceConversationId,null);
   h.options.onMessage({role:'agent',message:'late'});assert.equal(h.api.snapshot().agentCaption,null);
   await flush(); assert.equal(h.devices.getUserMedia,h.original,'guard restores after session end');
 

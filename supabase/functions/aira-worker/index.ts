@@ -1,4 +1,5 @@
 import { sameSecret } from "../_shared/domain.ts";
+import { syncPendingCallTranscripts } from "../_shared/native_calls.ts";
 import {
   Database,
   type Env,
@@ -21,12 +22,19 @@ export function createWorker(get: Env = env, fetcher: typeof fetch = fetch) {
       });
     }
     try {
-      const result = await new Database(
+      const db = new Database(
         get("SUPABASE_URL"),
         supabaseServerKey(get),
         fetcher,
-      ).rpc("aira_worker_tick");
-      return Response.json(result, {
+      );
+      // The SQL tick atomically creates incoming-call invitations as well as
+      // existing reminders. Provider transcript recovery is independently
+      // bounded and must never stop a due invitation from being delivered.
+      const result = await db.rpc("aira_worker_tick");
+      const callTranscriptsSynced = result.busy
+        ? 0
+        : await syncPendingCallTranscripts(db, get, fetcher, 5).catch(() => 0);
+      return Response.json({ ...result, callTranscriptsSynced }, {
         headers: { "Cache-Control": "no-store" },
       });
     } catch {

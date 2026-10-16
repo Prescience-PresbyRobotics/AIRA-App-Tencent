@@ -62,7 +62,7 @@ async function finish(success, reason) {
   view.textContent = JSON.stringify(result, null, 2);
   document.getElementById('stop').disabled = true;
   try {
-    await fetch('/result', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Aira-Smoke': config.nonce}, body: JSON.stringify(result)});
+    await fetch('/result', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Aira-Smoke': config.nonce}, body: JSON.stringify({...result, archive: {providerConversationId: airaRealtime.snapshot().voiceConversationId, entries: airaRealtime.snapshot().callTranscript}})});
   } catch (_) { view.textContent += '\nThe local test server is unavailable; it will perform cleanup on timeout.'; }
 }
 document.getElementById('stop').onclick = () => finish(false, 'stopped');

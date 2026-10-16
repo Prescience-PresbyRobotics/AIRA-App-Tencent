@@ -158,15 +158,18 @@ Deno.test("Authorized worker uses the modern server key only in the apikey heade
       AIRA_WORKER_SECRET: workerSecret,
     }),
     async (input, init) => {
-      equal(
-        String(input),
-        "https://supabase.test/rest/v1/rpc/aira_worker_tick",
-      );
       const headers = new Headers(init?.headers);
       equal(headers.get("apikey"), modern);
       equal(headers.get("Authorization"), null);
       equal(headers.get("x-aira-worker-secret"), null);
       calls++;
+      if (String(input).includes("/rest/v1/call_transcripts?")) {
+        return Response.json([]);
+      }
+      equal(
+        String(input),
+        "https://supabase.test/rest/v1/rpc/aira_worker_tick",
+      );
       return Response.json({
         events: 0,
         testReports: 0,
@@ -181,5 +184,5 @@ Deno.test("Authorized worker uses the modern server key only in the apikey heade
     }),
   );
   equal(response.status, 200);
-  equal(calls, 1);
+  equal(calls, 2);
 });

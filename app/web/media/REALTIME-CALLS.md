@@ -1,7 +1,9 @@
 # AIRA live browser calls
 
 Implemented 16 October 2026. Voice and video call screens use continuous ElevenLabs
-WebRTC audio with the server's OpenAI custom-LLM endpoint. Video means the local
+WebRTC audio with a native ElevenLabs Agent. The interaction prompt is saved in
+ElevenLabs and uses its configured `deepseek-v41-flash` model. Calls never forward
+to AIRA's OpenAI text endpoint. Video means the local
 camera preview alongside AIRA's animated mascot; camera frames are never uploaded.
 This is an AI companion, not another human on video.
 
@@ -32,30 +34,58 @@ for microphone permission if needed. Preview mode does not start a provider call
   conversationToken,
   connectionType: 'webrtc',
   webRtc: { singlePeerConnection: false },
-  customLlmExtraBody: { aira_session_token: signedPerCallToken },
-  dynamicVariables: { aira_name: '...' },
+  dynamicVariables: {
+    aira_name: '...',
+    aira_greeting: '...',
+    aira_call_id: '...',
+    aira_call_binding: '...'
+  },
   useWakeLock: false
 }
 ```
 
-The token is short-lived, kept in memory, and never logged, stored in local storage
-or rendered. The server controls the selected agent, voice, shared custom-LLM
-secret and OpenAI key. `customLlmExtraBody` is the official camel-case SDK option;
-its payload reaches ElevenLabs' custom LLM as `elevenlabs_extra_body`.
+The connection token and random call-binding nonce stay in memory and are never
+logged, persisted to browser storage or rendered. The server controls the private
+agent and holds the ElevenLabs key. There is no custom-LLM payload, OpenAI key or
+custom bridge secret in the live-call path. The agent prompt/configuration lives
+in `supabase/functions/_shared/voice_agent.ts` and is saved to ElevenLabs by the
+protected temporary `aira-voice-setup` helper's `configure-native` operation.
+That operation creates an agent when none is configured and updates it otherwise;
+remove the deployed helper after setup. The retired `aira-realtime` route returns
+410 so old browser builds cannot silently keep using the former OpenAI bridge.
 
-The configured ElevenLabs agent has audio recording disabled and retention_days
-set to zero, requesting scheduled deletion of provider conversation history and
-audio after each call. This is not the provider's special zero-retention mode:
-that setting is incompatible with this custom-LLM configuration. Do not describe
-this as no provider logging or immediate deletion. The call details disclose
-ElevenLabs voice processing, OpenAI replies, and this scheduled deletion policy.
+The configured native model is `deepseek-v41-flash`; Scribe Realtime recognizes
+speech and Jessica/`eleven_flash_v2` speaks. The agent's automatic thinking cue is
+disabled (`soft_timeout_config.timeout_seconds=-1`), and its prompt forbids repeated
+“Hmm, let me think” filler. Native calls use the provider's conversational behavior
+and prompt safeguards; they are not buffered through AIRA's OpenAI text-screening
+pipeline and do not automatically produce that route's incident records.
+
+The requested provider privacy settings disable recording and set `retention_days`
+to zero with transcript/audio deletion enabled. `zero_retention_mode` remains false.
+Zero days requests scheduled deletion; it is not a guarantee of immediate deletion
+or no provider logging. Saved AIRA transcripts are a separate owner-controlled
+archive. The app saves SDK captions and later retrieves a canonical provider copy,
+checking agent ID plus server-created call ID/binding against the provider's stored
+initiation variables. Guessed provider conversation IDs cannot reveal another
+owner's transcript. A labelled device-caption fallback remains if canonical
+recovery is unavailable. Provider transcript recovery is bounded and respects
+storage opt-out, account deletion and individual archive deletion.
+
+Call text lives only in **Settings → Call history**, not the main chat window or
+text-chat model context. It stays while Save conversations is enabled until the
+owner deletes it. A late response cannot recreate a removed archive. Starting and
+ending a call never clears the separate text thread; native call turns do not use
+text-message quota. Preview calls/transcripts are clearly labelled examples.
 
 The microphone is continuous while connected and unmuted. Mute immediately disables
-tracked audio tracks and calls the SDK's `setMicMuted`; End silences output, disables
-and stops tracks, calls `endSession`, clears transient captions and closes the server
-call. Spoken interruptions are handled by ElevenLabs' VAD/WebRTC SDK. Replies may
-pause while AIRA performs server checks. The screen counts duration only after a
-successful WebRTC connection and displays actual user/agent captions and mode events.
+tracked audio tracks and calls the SDK's `setMicMuted`; End silences output, saves
+permitted final captions, disables/stops tracks, calls `endSession`, clears transient
+captions and closes server call state. Spoken interruptions are handled by the
+ElevenLabs VAD/WebRTC SDK. Duration begins only after a successful connection. The
+interface uses actual caption/mode/audio-level events; the mascot is animated with
+waves, hops, stretches, blinks, listening nods and speaking reactions, with no
+eyebrows and with reduced-motion support.
 
 The SDK currently provides no AbortSignal for its pending microphone permission
 request. During the session, the adapter narrowly guards its audio `getUserMedia`
@@ -66,12 +96,26 @@ from capturing for a new session. The original browser function is restored when
 cleanup settles. There is no automatic reconnect or background resume in AIRA.
 
 A video-call action opens the local camera after audio connects; voice calls can
-enable the camera explicitly. Facial analysis remains separate and starts only after
-`face_cues` consent is saved. A fresh single-face estimate can be sent through the
-protected call-context endpoint (label and timestamp only). Unknown, stale, no-face,
-multiple-face and disabled states clear that estimate. A correction is sent as
-`selfReportedFeeling`, separate from the model result; clearing the stated feeling
-sends null. Both are ephemeral context, not automatically recorded mood measurements.
+enable it explicitly. Facial analysis needs the saved `face_cues` setting and browser
+camera permission. Only fresh single-face expression labels/timestamps and optional
+self-reported feelings may become transient native-agent context. Unknown, stale,
+no-face, multiple-face and disabled states clear the estimate. Self-report takes
+priority and stays separate. No camera frame is sent, and the prompt must not pretend
+to see video or diagnose how someone feels.
+
+## Scheduled incoming calls
+
+**Settings → Calls from AIRA** lets the owner choose one daily time in Singapore time
+(`Asia/Singapore`). No schedule is created until a time is chosen. A persistent
+server schedule produces a two-minute foreground incoming invitation; the user can
+Accept or Decline. A gentle local ringtone can be silenced; browser autoplay may block sound, but the visible controls remain available. The sound stops on accept/decline, expiry, logout or page hiding. Acceptance is owner-checked, versioned and single-use at call
+reservation. The native agent's dynamic opening greeting makes Aira speak first.
+
+The app must be open and visible at the chosen time. Closed tabs, sleeping devices,
+PSTN calls and background phone notifications are unsupported. A missed/late or
+busy occurrence does not unexpectedly ring later. Editing/pausing cancels pending
+invitations; removing the schedule deletes them. An explicitly chosen time is
+independent of ordinary social-reminder quiet hours and invitation limits.
 
 ## Browser compatibility and microphone controls
 
@@ -102,9 +146,10 @@ late permission after End, background cancellation and guard restoration.
 `media_lifecycle_test.cjs` covers local camera/analysis lifecycle and mirrored
 cover-crop box projection. These mock tests are separate from provider tests.
 
-On 16 October 2026, a browser test used the exact bundled SDK and adapter, generated
-speech supplied as a synthetic MediaStream, a private agent token, and the deployed
-screened OpenAI bridge. Before the compatibility option, WebRTC failed at negotiation.
+Historical check, earlier 16 October release: a browser test used the exact bundled
+SDK and adapter, generated speech supplied as a synthetic MediaStream, a private
+agent token and the then-deployed screened OpenAI bridge. It is transport evidence
+for the previous release, not acceptance of the replacement native agent. Before the compatibility option, WebRTC failed at negotiation.
 After the option, both SDK audio streams opened, ElevenLabs recognized the expected
 garden/tomatoes speech, and AIRA returned a new spoken reply. Observed input and
 output levels were nonzero. This verifies real browser WebRTC transport and provider
@@ -115,7 +160,10 @@ not exercise microphone ingestion and is not used as evidence for this result.
 Native iOS/Android Flutter media adapters remain unimplemented. Use the browser
 build. Physical devices, permission flows, realistic interruption/echo, call limits
 and actual provider deletion still need separate verification. Jessica remains the
-user-confirmed live voice.
+user-confirmed live voice. Current test/deployment results must identify the native
+agent configuration actually exercised; earlier custom-bridge timings do not apply.
+
+Current native-call release verification (16 October 2026): **72 Flutter tests and 42 Deno tests passed**, plus both JavaScript media lifecycle suites and a connected release web build. Supabase migrations004–006 and API/worker/retired-bridge functions are deployed; Firebase Hosting `aira-app-tencent` is updated. The private native agent settings were read back with `deepseek-v41-flash`, Jessica, no custom LLM or fallback, auth enabled and thinking filler disabled. A real browser WebRTC run with generated speech recognized the input and returned a spoken reply (16.1seconds for the entire fixture, not a response-latency benchmark). It then recovered the canonical provider transcript with ownership validation, verified that main text history contained no call turns, and sent a successful text message after hangup. A separate cloud check produced an invitation at the selected minute, accepted it and obtained a native session with Aira's scheduled opening greeting. Test accounts were removed and cleanup verified; the temporary setup function was deleted. Physical-device acceptance remains pending.
 
 ## Repeat the synthetic browser audio test
 
@@ -123,7 +171,9 @@ The test page lives in `scripts/`, outside the hosted app assets. It never opens
 physical microphone/camera; generated speech is injected into a MediaStream and
 flows through the same official SDK and AIRA adapter. It creates a marked synthetic
 account, mints a real call token, and deletes the account/call in `finally`. Normal
-provider charges apply. The local server binds only to `127.0.0.1`, checks Host/Origin,
+provider charges apply, including a separate text-chat check when the harness
+verifies messaging after hangup. The call itself uses ElevenLabs only. The local
+server binds only to `127.0.0.1`, checks Host/Origin,
 and protects its in-memory token endpoint with a per-run nonce. Keys, tokens and
 transcripts are not printed or saved. Only the caller-supplied synthetic WAV and a
 non-secret cleanup journal are files.

@@ -28,7 +28,7 @@ void main() {
       await tester.ensureVisible(find.text('Continue'));
       await tester.tap(find.text('Continue'));
       await tester.pump();
-      expect(controller.preferences.values.any((v) => v == true), false);
+      expect(controller.preferences.values.every((v) => v == true), true);
       await tester.scrollUntilVisible(
         find.text('Let’s chat'),
         300,
@@ -175,6 +175,7 @@ void main() {
 
   test('preview memory requires permission and is cleared on exit', () async {
     final controller = AiraController(null)..startPreview();
+    await controller.updatePreference('memory_enabled', false);
     await expectLater(
       controller.saveMemory('I enjoy gardening'),
       throwsException,

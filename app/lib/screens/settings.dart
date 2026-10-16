@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../controller.dart';
 import '../theme.dart';
 import '../widgets/ui.dart';
+import 'call_history.dart';
+import 'call_schedule.dart';
 
 class SettingsScreen extends StatelessWidget {
   final AiraController controller;
@@ -68,6 +70,28 @@ class SettingsScreen extends StatelessWidget {
                 icon: Icons.notifications_none_rounded,
                 color: AiraColors.peach,
                 onTap: () => _open(c, 'Reminders'),
+              ),
+              AiraSummaryCard(
+                title: 'Calls from AIRA',
+                subtitle: 'Choose when AIRA calls you',
+                icon: Icons.add_call,
+                color: AiraColors.sage,
+                onTap: () => Navigator.of(c).push(
+                  MaterialPageRoute(
+                    builder: (_) => CallScheduleScreen(controller: controller),
+                  ),
+                ),
+              ),
+              AiraSummaryCard(
+                title: 'Call history',
+                subtitle: 'Your voice and video transcripts',
+                icon: Icons.history_rounded,
+                color: AiraColors.lavender,
+                onTap: () => Navigator.of(c).push(
+                  MaterialPageRoute(
+                    builder: (_) => CallHistoryScreen(controller: controller),
+                  ),
+                ),
               ),
               AiraSummaryCard(
                 title: 'Care connections',
@@ -264,7 +288,7 @@ class SettingsScreen extends StatelessWidget {
       ),
       const AiraGap(height: 12),
       const Notice(
-        'OpenAI receives permitted conversation context. ElevenLabs processes voice audio. Provider retention must be checked before a real pilot.',
+        'OpenAI handles text chat. ElevenLabs handles live calls. Call transcripts are kept separately in Call history when saving is on.',
         icon: Icons.cloud_outlined,
       ),
     ],
@@ -296,7 +320,7 @@ class SettingsScreen extends StatelessWidget {
     ],
     'Care connections' => [
       const Notice(
-        'Caregiver linking is configured by an administrator. Sharing requires a verified link and your permission.',
+        'Open a view below. Live caregiver access needs a verified care link; admin access needs an assigned admin role. Preview mode shows example data.',
         icon: Icons.link_rounded,
       ),
       const AiraGap(height: 16),

@@ -15,6 +15,20 @@ String requestUuid() {
   return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
 }
 
+const defaultFeaturePreferences = <String, dynamic>{
+  'store_conversations': true,
+  'memory_enabled': true,
+  'social_reminders': true,
+  'medication_reminders': true,
+  'impact_measurement': true,
+  'monitoring_enabled': true,
+  'mood_history': true,
+  'face_cues': true,
+  'urgent_sharing': true,
+  'reviewed_sharing': true,
+  'admin_insights': true,
+};
+
 enum MessageDelivery { sending, delivered, read, unconfirmed, cancelled }
 
 const airaIntroduction =
@@ -117,6 +131,17 @@ class AiraController extends ChangeNotifier {
   Map<String, dynamic> capabilities = {};
   List<Map<String, dynamic>> memories = [], plans = [], medications = [];
   List<ChatTurn> messages = [];
+  List<Map<String, dynamic>> callHistory = [];
+  bool callHistoryLoading = false;
+  String callHistoryError = '';
+  String? callHistoryCursor;
+  int _callHistoryGeneration = 0;
+  Map<String, dynamic>? callSchedule, incomingCall;
+  int _scheduleGeneration = 0;
+  String? pendingScheduledCallId;
+  bool callStarting = false;
+  bool get callBusy => callStarting || activeCallId.isNotEmpty;
+
   final List<ChatTurn> outbox = [];
   ChatTurn? _introduction;
   String? suggestedName;
@@ -128,6 +153,7 @@ class AiraController extends ChangeNotifier {
   bool get historyAwaitingReply => messages.any(
     (turn) =>
         !turn.fromAira &&
+        turn.mode == 'text' &&
         turn.requestStatus == 'processing' &&
         DateTime.now().difference(turn.time) < const Duration(minutes: 2),
   );
@@ -141,7 +167,8 @@ class AiraController extends ChangeNotifier {
     fromAira: true,
   );
   List<ChatTurn> get visibleMessages =>
-      [...messages, ...outbox]..sort(_chronological);
+      [...messages, ...outbox].where((turn) => turn.mode == 'text').toList()
+        ..sort(_chronological);
   static int _chronological(ChatTurn a, ChatTurn b) {
     final time = a.time.compareTo(b.time);
     if (time != 0) return time;
@@ -185,6 +212,11 @@ class AiraController extends ChangeNotifier {
     name = '';
     conversationId = '';
     activeCallId = '';
+    callStarting = false;
+    callSchedule = incomingCall = null;
+    _scheduleGeneration++;
+    pendingScheduledCallId = null;
+    _clearCallHistory();
     messages = [];
     memories = [];
     plans = [];
@@ -202,6 +234,7 @@ class AiraController extends ChangeNotifier {
   void startPreview() {
     _clear();
     preview = true;
+    preferences.addAll(defaultFeaturePreferences);
     notifyListeners();
   }
 
@@ -341,10 +374,19 @@ class AiraController extends ChangeNotifier {
     if (key == 'store_conversations' && value) await refreshHistory();
   }
 
+  void _clearCallHistory() {
+    _callHistoryGeneration++;
+    callHistory = [];
+    callHistoryLoading = false;
+    callHistoryError = '';
+    callHistoryCursor = null;
+  }
+
   void _clearHistory() {
     _historyPoll?.cancel();
     _historyPoll = null;
     _historyGeneration++;
+    _clearCallHistory();
     historyLoading = historyLoaded = false;
     historyCursor = null;
     historyError = '';
@@ -380,23 +422,26 @@ class AiraController extends ChangeNotifier {
           'Your privacy choices changed. Refresh your account to reload history.',
         );
       }
-      final restored = _items(result, 'messages').map(
-        (item) => ChatTurn(
-          id: item['id'].toString(),
-          text: item['text'].toString(),
-          fromAira: item['role'] == 'assistant',
-          time: DateTime.parse(item['createdAt'].toString()).toLocal(),
-          mode: item['mode']?.toString() ?? 'text',
-          contextVersion: item['contextVersion'] as int?,
-          historyOrder: BigInt.tryParse(item['order']?.toString() ?? ''),
-          requestStatus: item['requestStatus']?.toString(),
-          delivery: item['delivery'] == 'delivered'
-              ? MessageDelivery.delivered
-              : MessageDelivery.read,
-        ),
-      );
+      final restored = _items(result, 'messages')
+          .where((item) => item['mode'] == null || item['mode'] == 'text')
+          .map(
+            (item) => ChatTurn(
+              id: item['id'].toString(),
+              text: item['text'].toString(),
+              fromAira: item['role'] == 'assistant',
+              time: DateTime.parse(item['createdAt'].toString()).toLocal(),
+              mode: item['mode']?.toString() ?? 'text',
+              contextVersion: item['contextVersion'] as int?,
+              historyOrder: BigInt.tryParse(item['order']?.toString() ?? ''),
+              requestStatus: item['requestStatus']?.toString(),
+              delivery: item['delivery'] == 'delivered'
+                  ? MessageDelivery.delivered
+                  : MessageDelivery.read,
+            ),
+          );
       final merged = <String, ChatTurn>{
-        for (final turn in messages) turn.id: turn,
+        for (final turn in messages.where((turn) => turn.mode == 'text'))
+          turn.id: turn,
       };
       for (final turn in restored) {
         final existing = merged[turn.id];
@@ -605,8 +650,9 @@ class AiraController extends ChangeNotifier {
     final history = messages
         .where(
           (turn) =>
-              turn.contextVersion == null ||
-              turn.contextVersion == privacyVersion,
+              turn.mode == 'text' &&
+              (turn.contextVersion == null ||
+                  turn.contextVersion == privacyVersion),
         )
         .toList();
     final opening = _introduction;
@@ -871,11 +917,192 @@ class AiraController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> refreshCallHistory({bool older = false}) async {
+    if (preview || !consent('store_conversations') || callHistoryLoading) {
+      return;
+    }
+    if (older && callHistoryCursor == null) return;
+    final session = sessionEpoch;
+    final version = privacyVersion;
+    final generation = _callHistoryGeneration;
+    final before = older ? callHistoryCursor : null;
+    callHistoryLoading = true;
+    callHistoryError = '';
+    notifyListeners();
+    try {
+      final result = await api.request(
+        'GET',
+        '/calls/history${before == null ? '' : '?before=${Uri.encodeQueryComponent(before)}'}',
+      );
+      if (!_current(session) ||
+          version != privacyVersion ||
+          generation != _callHistoryGeneration) {
+        return;
+      }
+      if (result['privacyVersion'] != null &&
+          result['privacyVersion'] != version) {
+        throw const AiraException(
+          'Your privacy choices changed. Reopen call history to refresh.',
+        );
+      }
+      final merged = <String, Map<String, dynamic>>{
+        if (older)
+          for (final call in callHistory) call['id'].toString(): call,
+        for (final call in _items(result, 'calls')) call['id'].toString(): call,
+      };
+      callHistory = merged.values.toList();
+      callHistoryCursor = result['nextCursor']?.toString();
+    } catch (e) {
+      if (_current(session) && generation == _callHistoryGeneration) {
+        callHistoryError = cleanError(e);
+      }
+    } finally {
+      if (_current(session) && generation == _callHistoryGeneration) {
+        callHistoryLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> loadCallTranscript(String id) async {
+    if (preview || !consent('store_conversations')) {
+      throw const AiraException(
+        'Turn on Save conversations to keep call transcripts.',
+      );
+    }
+    final session = sessionEpoch;
+    final version = privacyVersion;
+    final result = await api.request('GET', '/calls/$id/transcript');
+    if (!_current(session) ||
+        version != privacyVersion ||
+        (result['privacyVersion'] != null &&
+            result['privacyVersion'] != version)) {
+      throw const AiraException(
+        'Your account or privacy choices changed. Reopen call history.',
+      );
+    }
+    return result;
+  }
+
+  Future<void> saveCallTranscript(
+    String providerConversationId,
+    List<Map<String, dynamic>> entries, {
+    String? conversationId,
+    int? expectedSession,
+  }) async {
+    final session = expectedSession ?? sessionEpoch;
+    if (!_current(session)) return;
+    final id = conversationId ?? activeCallId;
+    if (preview || id.isEmpty || providerConversationId.isEmpty) return;
+    await api.request('POST', '/calls/$id/transcript', {
+      'providerConversationId': providerConversationId,
+      'entries': entries,
+    });
+    if (_current(session) && !callBusy) unawaited(refreshCallHistory());
+  }
+
+  Future<void> deleteCallTranscript(String id) async {
+    final session = sessionEpoch;
+    if (!preview) await api.request('DELETE', '/calls/$id/transcript');
+    if (!_current(session)) return;
+    _callHistoryGeneration++;
+    callHistoryLoading = false;
+    callHistory.removeWhere((call) => call['id'] == id);
+    notifyListeners();
+  }
+
+  Future<void> refreshCallSchedule() async {
+    if (preview) return;
+    final session = sessionEpoch;
+    final generation = _scheduleGeneration;
+    final result = await api.request('GET', '/call-schedule');
+    if (!_current(session) || generation != _scheduleGeneration) return;
+    callSchedule = result['schedule'] == null
+        ? null
+        : Map<String, dynamic>.from(result['schedule']);
+    incomingCall = result['incomingCall'] == null
+        ? null
+        : Map<String, dynamic>.from(result['incomingCall']);
+    notifyListeners();
+  }
+
+  Future<void> saveCallSchedule(TimeOfDay time, {bool enabled = true}) async {
+    _scheduleGeneration++;
+    final session = sessionEpoch;
+    final clock =
+        '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+    final payload = <String, dynamic>{
+      'localTime': clock,
+      'timeZone': 'Asia/Singapore',
+      'enabled': enabled,
+      if (callSchedule?['version'] != null)
+        'expectedVersion': callSchedule!['version'],
+    };
+    if (preview) {
+      callSchedule = {
+        ...payload,
+        'version': (callSchedule?['version'] as int? ?? 0) + 1,
+      };
+    } else {
+      final result = await api.request('PATCH', '/call-schedule', payload);
+      if (!_current(session)) return;
+      callSchedule = result['schedule'] == null
+          ? null
+          : Map<String, dynamic>.from(result['schedule']);
+    }
+    if (!enabled) incomingCall = null;
+    notifyListeners();
+  }
+
+  Future<void> deleteCallSchedule() async {
+    _scheduleGeneration++;
+    final session = sessionEpoch;
+    if (!preview) {
+      await api.request('DELETE', '/call-schedule', {
+        if (callSchedule?['version'] != null)
+          'expectedVersion': callSchedule!['version'],
+      });
+    }
+    if (!_current(session)) return;
+    callSchedule = incomingCall = null;
+    pendingScheduledCallId = null;
+    notifyListeners();
+  }
+
+  Future<bool> respondScheduledCall(
+    Map<String, dynamic> invitation,
+    String action,
+  ) async {
+    final session = sessionEpoch;
+    if (action == 'accept' && callBusy) {
+      throw const AiraException('Please finish your current call first.');
+    }
+    final result = await api.request(
+      'POST',
+      '/scheduled-calls/${invitation['id']}/respond',
+      {
+        'action': action,
+        'expectedVersion': invitation['version'] ?? 1,
+        'requestId': requestUuid(),
+      },
+    );
+    if (!_current(session)) return false;
+    _scheduleGeneration++;
+    incomingCall = null;
+    final start = action == 'accept' && result['startCall'] == true;
+    if (start) pendingScheduledCallId = invitation['id'].toString();
+    notifyListeners();
+    return start;
+  }
+
   Future<Map<String, dynamic>> beginRealtimeCall(String mode) async {
     if (preview) {
       throw const AiraException(
         'Live calls are not connected in this preview.',
       );
+    }
+    if (callBusy) {
+      throw const AiraException('A call is already connecting or active.');
     }
     cancelSend();
     pendingRequest = null;
@@ -883,26 +1110,37 @@ class AiraController extends ChangeNotifier {
     final turnRevision = revision;
     final session = sessionEpoch;
     final service = api;
-    final result = await service.request('POST', '/calls/session', {
-      'mode': mode,
-    });
-    final id = result['conversationId']?.toString() ?? '';
-    if (!_current(session) || turnRevision != revision) {
-      if (_current(session) && id.isNotEmpty) {
-        try {
-          await service.request('POST', '/calls/$id/end', {});
-        } catch (_) {}
-      }
-      throw const AiraException('This call has ended.');
-    }
-    if (id.isEmpty || result['conversationToken'] is! String) {
-      throw const AiraException(
-        'Aira could not connect this call. Please try again.',
-      );
-    }
-    activeCallId = id;
+    callStarting = true;
     notifyListeners();
-    return result;
+    try {
+      final result = await service.request('POST', '/calls/session', {
+        'mode': mode,
+        if (pendingScheduledCallId != null)
+          'invitationId': pendingScheduledCallId,
+      });
+      final id = result['conversationId']?.toString() ?? '';
+      if (!_current(session) || turnRevision != revision) {
+        if (_current(session) && id.isNotEmpty) {
+          try {
+            await service.request('POST', '/calls/$id/end', {});
+          } catch (_) {}
+        }
+        throw const AiraException('This call has ended.');
+      }
+      if (id.isEmpty || result['conversationToken'] is! String) {
+        throw const AiraException(
+          'Aira could not connect this call. Please try again.',
+        );
+      }
+      activeCallId = id;
+      pendingScheduledCallId = null;
+      return result;
+    } finally {
+      if (_current(session) && turnRevision == revision) {
+        callStarting = false;
+        notifyListeners();
+      }
+    }
   }
 
   Future<void> publishCallContext({
@@ -944,6 +1182,8 @@ class AiraController extends ChangeNotifier {
     cancelSend();
     final id = activeCallId;
     activeCallId = '';
+    callStarting = false;
+    pendingScheduledCallId = null;
     pendingText = null;
     pendingRequest = null;
     if (!preview && id.isNotEmpty) {
@@ -952,7 +1192,6 @@ class AiraController extends ChangeNotifier {
       } catch (_) {
         /* Local capture must still end if the backend is unavailable. */
       }
-      await refreshHistory();
     }
     notifyListeners();
   }

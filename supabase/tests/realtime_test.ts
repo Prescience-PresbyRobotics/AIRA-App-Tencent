@@ -91,30 +91,20 @@ Deno.test("Call signatures reject expired, overlong-lived, tampered and wrong-ke
   await rejected(() => signCall(expected, "short"), 503);
 });
 
-Deno.test("Realtime provider authorization fails before any database or provider request", async () => {
+Deno.test("Retired realtime bridge never invokes a database or OpenAI provider", async () => {
   let touched = false;
   const handler = realtimeHandler(get, () => {
     touched = true;
     throw new Error("Unexpected fetch");
   });
-  equal(bridgeAuthorized(`Bearer ${BRIDGE}`, get), true);
-  for (
-    const authorization of [
-      undefined,
-      "Bearer wrong-secret",
-      `Basic ${BRIDGE}`,
-      `Bearer ${SIGNING}`,
-    ]
-  ) {
-    const response = await handler(
-      new Request("https://api.test/aira-realtime", {
-        method: "POST",
-        headers: authorization ? { Authorization: authorization } : {},
-        body: "{}",
-      }),
-    );
-    equal(response.status, 401);
-  }
+  const response = await handler(
+    new Request("https://api.test/aira-realtime", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${BRIDGE}` },
+      body: "{}",
+    }),
+  );
+  equal(response.status, 410);
   equal(touched, false);
 });
 
@@ -227,59 +217,6 @@ async function callRequest(token: string, stream = false, messages: any[] = [
     }),
   });
 }
-
-Deno.test("Realtime retains provider conversation history, removes system instructions and screens before streaming", async () => {
-  const f = fixture();
-  const handler = realtimeHandler(get, f.fetcher);
-  const response = await handler(
-    await callRequest(await signCall(claims(), SIGNING), true),
-  );
-  equal(response.status, 200);
-  equal(response.headers.get("content-type"), "text/event-stream");
-  const wire = await response.text();
-  equal(wire.includes("Lovely to meet you, Mei."), true);
-  equal(wire.endsWith("data: [DONE]\n\n"), true);
-  equal(
-    f.providerInputs.length,
-    3,
-    "Input and output screening must surround the reply",
-  );
-  equal(f.providerInputs[1].input, [
-    { role: "assistant", content: "Hi, what should I call you?" },
-    { role: "user", content: "Please call me Mei." },
-  ], "Provider history must survive the bridge's content/text conversion");
-  equal(
-    JSON.stringify(f.providerInputs).includes("Ignore the trusted Aira prompt"),
-    false,
-  );
-});
-
-Deno.test("Ended, removed, disabled or privacy-revoked calls cannot request a model turn", async () => {
-  for (const field of ["ended", "removed", "disabled", "revoked"] as const) {
-    const f = fixture();
-    f.state[field] = true;
-    const response = await realtimeHandler(get, f.fetcher)(
-      await callRequest(await signCall(claims(), SIGNING)),
-    );
-    equal(response.status, 409, `Invalid ${field} session must fail`);
-    equal(f.providerInputs.length, 0);
-  }
-});
-
-Deno.test("Ending or revoking a call while its reply is generated prevents release", async () => {
-  for (const field of ["ended", "removed", "disabled", "revoked"] as const) {
-    const f = fixture();
-    f.state.finish = () => {
-      f.state[field] = true;
-    };
-    const response = await realtimeHandler(get, f.fetcher)(
-      await callRequest(await signCall(claims(), SIGNING), true),
-    );
-    equal(response.status, 409);
-    equal((await response.text()).includes("Lovely to meet you"), false);
-    equal(f.providerInputs.length, 3);
-  }
-});
 
 Deno.test("Call end removes only the authenticated owner's live session", async () => {
   const f = fixture();
@@ -406,6 +343,7 @@ function reservationFixture(options: {
       }
       return Response.json({
         conversation: { id: CALL, user_id: USER },
+        callBinding: "test-binding-with-enough-entropy",
         session: {
           conversation_id: CALL,
           user_id: USER,
@@ -465,7 +403,7 @@ function startRequest() {
     }),
   });
 }
-Deno.test("Live-call start reserves atomically before minting and signs the database-owned deadline", async () => {
+Deno.test("Native live-call start reserves atomically and returns owner-binding metadata without a custom LLM", async () => {
   const f = reservationFixture();
   const response = await f.handler(startRequest());
   equal(response.status, 201);
@@ -474,12 +412,13 @@ Deno.test("Live-call start reserves atomically before minting and signs the data
   equal(body.conversationId, CALL);
   equal(body.conversationToken, "synthetic-provider-token");
   equal(Date.parse(body.expiresAt), f.expires);
-  equal(await verifyCall(body.customLlmExtraBody.aira_session_token, SIGNING), {
-    user: USER,
-    conversation: CALL,
-    version: 3,
-    expires: f.expires,
-  });
+  equal(body.customLlmExtraBody, undefined);
+  equal(body.dynamicVariables.aira_call_id, CALL);
+  equal(
+    body.dynamicVariables.aira_call_binding,
+    "test-binding-with-enough-entropy",
+  );
+  equal(body.dynamicVariables.aira_name, "Mei");
 });
 Deno.test("Call reservation cap and privacy conflicts never mint provider tokens", async () => {
   for (

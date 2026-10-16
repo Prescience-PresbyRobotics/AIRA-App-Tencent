@@ -82,7 +82,7 @@ def main():
         print('stream generated WAV speech through the actual ElevenLabs WebRTC SDK, verify')
         print('expected transcription plus a new non-filler spoken reply, and remove the account.')
         print('Requires --audio-file (mono 16 kHz PCM WAV) and --expect word [word ...].')
-        print('Normal OpenAI/ElevenLabs usage charges apply. Physical microphone/camera never opens.')
+        print('Normal ElevenLabs usage plus one OpenAI text-reply verification charges apply. Physical microphone/camera never opens.')
         return
     audio = None
     if not args.cleanup_run:
@@ -102,7 +102,7 @@ def main():
     nonce = secrets.token_urlsafe(32)
     host = f'127.0.0.1:{args.port}'
     local_origin = f'http://{host}'
-    call, server, outcome = None, None, None
+    call, server, outcome, archive = None, None, None, None
     page = (ROOT / 'scripts/smoke_browser_audio.html').read_text().replace(
         '__AIRA_TEST_CONFIG__', json.dumps({'nonce': nonce, 'expected': args.expect}))
     assets = {
@@ -155,7 +155,7 @@ def main():
                 self.send_error(404)
 
         def do_POST(self):
-            nonlocal outcome
+            nonlocal outcome, archive
             if self.path != '/result':
                 self.send_error(404)
                 return
@@ -163,8 +163,10 @@ def main():
                 return
             try:
                 size = int(self.headers.get('Content-Length', 0))
-                require(0 < size <= 2000, 'Result body too large.')
-                outcome = validated_result(json.loads(self.rfile.read(size)))
+                require(0 < size <= 262144, 'Result body too large.')
+                body = json.loads(self.rfile.read(size))
+                outcome = validated_result(body)
+                archive = body.get('archive')
             except (ValueError, SmokeError, OSError):
                 self.send_error(400)
                 return
@@ -189,7 +191,9 @@ def main():
             {'email': smoke.email, 'password': password}, {'apikey': public_key})
         smoke.token = login.get('access_token')
         require(isinstance(smoke.token, str) and len(smoke.token) > 40, 'No synthetic access token.')
-        smoke.app('GET', '/me', 'Initialize synthetic profile')
+        _, me, _, _ = smoke.app('GET', '/me', 'Initialize synthetic profile')
+        choices = {key: key == 'conversation_storage' for key in me['profile']['consents']}
+        smoke.app('PATCH', '/preferences', 'Keep only synthetic transcript storage', {'consents': choices})
         _, call, _, _ = smoke.app('POST', '/calls/session', 'WebRTC token mint', {'mode': 'voice'}, expected=(201,))
         print(f'READY: open {local_origin}/ and click Run synthetic WebRTC call.', flush=True)
         print('No physical microphone or camera is accessed. Keep this test page visible.', flush=True)
@@ -198,6 +202,31 @@ def main():
             server.handle_request()
         require(outcome is not None, 'Browser test deadline expired.')
         require(outcome['success'], 'Browser WebRTC audio test did not pass; see safe measurements above.')
+        require(isinstance(archive, dict) and isinstance(archive.get('entries'), list), 'No browser transcript to archive.')
+        smoke.app('POST', '/calls/' + call['conversationId'] + '/transcript', 'Archive browser captions', archive)
+        smoke.app('POST', '/calls/' + call['conversationId'] + '/end', 'End native call', {})
+        _, history, _, _ = smoke.app('GET', '/history', 'Text isolation')
+        require(history.get('messages') == [], 'Call transcript leaked into main text history.')
+        _, detail, _, _ = smoke.app('GET', '/calls/' + call['conversationId'] + '/transcript', 'Read call transcript')
+        require(len(detail.get('messages', [])) >= 2, 'Call captions were not saved separately.')
+        provider_verified = detail.get('call', {}).get('source') == 'elevenlabs'
+        for _ in range(2):
+            if provider_verified:
+                break
+            time.sleep(11)
+            _, detail, _, _ = smoke.app('GET', '/calls/' + call['conversationId'] + '/transcript', 'Canonical transcript recovery')
+            provider_verified = detail.get('call', {}).get('source') == 'elevenlabs'
+        require(provider_verified, 'Provider transcript ownership/recovery was not verified.')
+        _, me, _, _ = smoke.app('GET', '/me', 'Current privacy version')
+        _, reply, _, _ = smoke.app('POST', '/messages', 'Text immediately after native call', {
+            'clientMessageId': str(uuid.uuid4()), 'mode': 'text',
+            'contextVersion': me['profile']['consent_version'],
+            'text': 'That was a nice chat about my garden. The tomatoes are growing well.',
+        })
+        require(reply.get('status') == 'approved' and bool(reply.get('text')), 'Text after call did not return a reply.')
+        _, history, _, _ = smoke.app('GET', '/history', 'Read separate text history')
+        require(len(history.get('messages', [])) == 2 and all(item.get('mode') == 'text' for item in history['messages']), 'Text and call histories are not isolated.')
+        print('PASS: separately saved canonical ElevenLabs transcript, verified ownership, isolated main chat and text reply after call.', flush=True)
     finally:
         if server:
             server.server_close()

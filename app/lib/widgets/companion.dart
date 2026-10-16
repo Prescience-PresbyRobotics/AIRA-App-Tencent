@@ -311,27 +311,6 @@ class _CompanionPainter extends CustomPainter {
         }
       }
     }
-    if (thinking || thoughtful || reassuring || connecting) {
-      final eyebrow = Paint()
-        ..color = const Color(0xFF985848)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.3
-        ..strokeCap = StrokeCap.round;
-      c.drawArc(
-        Rect.fromLTWH(86, thinking ? 88 : 90, 17, 6),
-        math.pi,
-        math.pi,
-        false,
-        eyebrow,
-      );
-      c.drawArc(
-        Rect.fromLTWH(147, thinking ? 86 : 92, 17, 6),
-        math.pi,
-        math.pi,
-        false,
-        eyebrow,
-      );
-    }
     final blush = Paint()
       ..color = const Color(0xFFF37963).withValues(alpha: playful ? .44 : .30)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);

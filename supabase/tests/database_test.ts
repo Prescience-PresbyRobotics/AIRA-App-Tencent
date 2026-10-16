@@ -18,6 +18,7 @@ async function database() {
       "202610160001_realtime_calls.sql",
       "202610160002_durable_history.sql",
       "202610160003_pending_history.sql",
+      "202610160004_native_call_archives.sql",
     ]
   ) {
     const migration = await Deno.readTextFile(
@@ -324,7 +325,7 @@ Deno.test({
       );
       assert(
         first.conversation.id === first.session.conversation_id &&
-          first.conversation.initiator === "aira",
+          first.conversation.initiator === "senior",
       );
       assert(
         first.session.consent_version === 1 &&
@@ -490,9 +491,18 @@ Deno.test({
         "update realtime_sessions set expires_at=now()-interval '1 second' where conversation_id=$1",
         [id],
       );
-      await fails(() => message(A), "rate_limited");
+      await fails(() => message(A), "conversation_not_found");
       await q("delete from realtime_sessions where conversation_id=$1", [id]);
-      await fails(() => message(A), "rate_limited");
+      await fails(() => message(A), "conversation_not_found");
+      const textAfterCall =
+        (await q("select aira_reserve_message($1,$2,null,'text') result", [
+          A,
+          crypto.randomUUID(),
+        ]))[0].result;
+      assert(
+        textAfterCall.request.status === "processing",
+        "Spoken turns never exhaust text chat quota",
+      );
       await q(
         "insert into realtime_sessions(conversation_id,user_id,consent_version) values($1,$2,1)",
         [id, A],
@@ -704,6 +714,190 @@ Deno.test({
       assert(
         (await q("select * from messages where user_id=$1", [B])).length === 0,
         "Outgoing persistence still requires storage consent",
+      );
+    } finally {
+      await db.close();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "Native call archives stay separate, owner-bound, durable, revocable and resistant to stale caption overwrites",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const db = await database();
+    const q = async (sql: string, args: unknown[] = []) =>
+      (await db.query<any>(sql, args)).rows;
+    try {
+      await q("insert into auth.users(id) values($1),($2)", [A, B]);
+      await q(
+        `select aira_preferences($1,'{"consents":{"conversation_storage":true}}')`,
+        [A],
+      );
+      const call =
+        (await q("select aira_reserve_call($1,'video',2) value", [A]))[0].value;
+      assert(
+        call.callBinding.length === 64,
+        "Each call has a random binding distinct from its public id",
+      );
+      const id = call.conversation.id;
+      const save = async (
+        user: string,
+        provider: string,
+        entries: any[],
+        source = "device_captions",
+      ) =>
+        (await q(
+          "select aira_save_call_transcript($1,$2,$3,$4::jsonb,$5,'ready',null) value",
+          [user, id, provider, JSON.stringify(entries), source],
+        ))[0].value;
+      const device = [{
+        role: "user",
+        text: "Device caption",
+        timeInCallSecs: 1,
+      }];
+      assert(
+        !await save(B, "conv_test", device),
+        "Another owner cannot write this call",
+      );
+      assert(
+        await save(A, "conv_test", device),
+        "Owner can save device captions",
+      );
+      await fails(() => save(A, "conv_swapped", device), "state_conflict");
+      assert(
+        (await q("select aira_chat_history($1,null,50) value", [A]))[0].value
+          .messages.length === 0,
+        "Call captions never appear in main chat",
+      );
+      const history =
+        (await q("select aira_call_history($1,null,$2) value", [A, id]))[0]
+          .value;
+      assert(
+        history.calls[0].entries[0].text === "Device caption" &&
+          history.calls[0].source === "device_captions",
+        "Separate detail contains labelled captions",
+      );
+      assert(
+        (await q("select aira_call_history($1,null,$2) value", [B, id]))[0]
+          .value.calls.length === 0,
+        "Other owner cannot read archive",
+      );
+      assert(
+        !JSON.stringify(history).includes(call.callBinding),
+        "Private binding never appears in history",
+      );
+      const canonical = [{
+        role: "assistant",
+        text: "Canonical reply",
+        timeInCallSecs: 2,
+      }];
+      assert(
+        await save(A, "conv_test", canonical, "elevenlabs"),
+        "Verified provider data can replace captions",
+      );
+      await save(A, "conv_test", [...device, ...device]);
+      assert(
+        (await q(
+          "select entries,source from call_transcripts where conversation_id=$1",
+          [id],
+        ))[0].entries[0].text === "Canonical reply",
+        "Late device events cannot overwrite canonical text",
+      );
+      await q(
+        "update conversations set accepted_at=now()-interval '30 days' where id=$1",
+        [id],
+      );
+      await q("select aira_worker_tick()");
+      assert(
+        (await q("select aira_call_history($1,null,$2) value", [A, id]))[0]
+          .value.calls.length === 1,
+        "Saved call text survives the normal content-expiry worker",
+      );
+      await q("select aira_clear_chat_history($1)", [A]);
+      assert(
+        (await q("select aira_call_history($1,null,$2) value", [A, id]))[0]
+          .value.calls.length === 1,
+        "Clearing main chat leaves the separate call archive",
+      );
+      assert(
+        !await save(A, "conv_test", device),
+        "Privacy-version changes block late writes",
+      );
+      await db.exec(
+        `set role authenticated;select set_config('request.jwt.claim.sub','${A}',false);`,
+      );
+      await fails(
+        () => q("select * from call_transcripts"),
+        "permission denied",
+      );
+      await fails(
+        () => q("select aira_call_history($1,null,null)", [B]),
+        "permission denied",
+      );
+      await db.exec("reset role");
+      await q(
+        `select aira_preferences($1,'{"consents":{"conversation_storage":false}}')`,
+        [A],
+      );
+      assert(
+        (await q("select * from call_transcripts")).length === 0,
+        "Turning saving off removes the archive",
+      );
+      assert(
+        !await save(A, "conv_test", device),
+        "A late caption cannot recreate deleted history",
+      );
+    } finally {
+      await db.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "Failed text retry reuses one request without a duplicate bubble",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const db = await database();
+    const q = async (sql: string, args: unknown[] = []) =>
+      (await db.query<any>(sql, args)).rows;
+    try {
+      await q("insert into auth.users(id) values($1)", [A]);
+      const client = crypto.randomUUID();
+      const first =
+        (await q("select aira_reserve_message($1,$2,null,'text') value", [
+          A,
+          client,
+        ]))[0].value;
+      await q(
+        "update message_requests set status='failed',created_at=now()-interval '5 minutes' where id=$1",
+        [
+          first.request.id,
+        ],
+      );
+      const retry =
+        (await q("select aira_reserve_message($1,$2,null,'text') value", [
+          A,
+          client,
+        ]))[0].value;
+      assert(
+        !retry.duplicate && retry.request.id === first.request.id &&
+          retry.request.status === "processing",
+        "Retry resumes the same failed logical message",
+      );
+      assert(
+        (await q("select * from message_requests")).length === 1,
+        "Retry does not create another request",
+      );
+      await q("select aira_worker_tick()");
+      assert(
+        (await q("select status from message_requests where id=$1", [
+          first.request.id,
+        ]))[0].status === "processing",
+        "Old failed messages receive a fresh processing deadline when retried",
       );
     } finally {
       await db.close();

@@ -15,14 +15,18 @@ class OnboardingScreen extends StatefulWidget {
 class _OnboardingState extends State<OnboardingScreen> {
   int step = 0;
   bool busy = false;
-  final choices = <String, dynamic>{
-    'store_conversations': true,
-    'memory_enabled': false,
-    'social_reminders': false,
-    'medication_reminders': false,
-    'impact_measurement': false,
-    'monitoring_enabled': false,
-  };
+  late final Map<String, dynamic> choices;
+  @override
+  void initState() {
+    super.initState();
+    choices = {
+      ...defaultFeaturePreferences,
+      for (final entry in widget.controller.preferences.entries)
+        if (defaultFeaturePreferences.containsKey(entry.key))
+          entry.key: entry.value,
+    };
+  }
+
   Future<void> finish() async {
     setState(() => busy = true);
     try {
@@ -115,7 +119,7 @@ class _OnboardingState extends State<OnboardingScreen> {
                   ),
                   const AiraGap(height: 12),
                   const Text(
-                    'Everything below is optional. You can change your choices at any time.',
+                    'Features start on. Review or turn off any choice below; you can change it later in Settings.',
                     style: TextStyle(
                       color: AiraColors.muted,
                       fontSize: 18,
@@ -152,6 +156,31 @@ class _OnboardingState extends State<OnboardingScreen> {
                     'monitoring_enabled',
                     'Allow safety-review evidence',
                     'Save limited flagged excerpts for authorized review. Test-only in this prototype.',
+                  ),
+                  _choice(
+                    'mood_history',
+                    'Save my reported mood',
+                    'Keep feelings you choose to record.',
+                  ),
+                  _choice(
+                    'face_cues',
+                    'Facial expression estimates',
+                    'Show live estimates during video calls. Camera frames stay on your device.',
+                  ),
+                  _choice(
+                    'admin_insights',
+                    'Share insights with assigned staff',
+                    'Only assigned, authorized staff can view them.',
+                  ),
+                  _choice(
+                    'urgent_sharing',
+                    'Share urgent concerns with my caregiver',
+                    'Requires a verified care link. Test inbox only; no external notifications yet.',
+                  ),
+                  _choice(
+                    'reviewed_sharing',
+                    'Share reviewed reports',
+                    'Requires a verified care link and reviewer approval.',
                   ),
                   const AiraGap(height: 20),
                   const Notice(

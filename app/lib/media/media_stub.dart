@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 
 import 'media_types.dart';
 
+Future<void> startIncomingRingtone() async {}
+void stopIncomingRingtone() {}
+
 /// Native audio/camera adapters remain a separate, explicitly unimplemented milestone.
 class AiraMediaController extends ChangeNotifier {
   AiraMediaState state = const AiraMediaState(
@@ -15,6 +18,8 @@ class AiraMediaController extends ChangeNotifier {
   Future<void> startRealtime(Map<String, dynamic> config) => Future.error(
     UnsupportedError('Live calls are available in the browser version.'),
   );
+  void clearCallTranscript() {}
+  void sendCallContext(String text) {}
   void setMicMuted(bool muted) {}
   void setSpeakerMuted(bool muted) {}
   Future<void> refreshMicrophones() async {}

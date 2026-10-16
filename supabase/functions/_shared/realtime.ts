@@ -74,9 +74,7 @@ export function bridgeAuthorized(header: string | null, get: Env) {
   return secret.length >= 32 && sameSecret(header ?? "", `Bearer ${secret}`);
 }
 export function realtimeConfigured(get: Env) {
-  return !!get("ELEVENLABS_AGENT_ID") && !!get("ELEVENLABS_API_KEY") &&
-    get("AIRA_CALL_SIGNING_SECRET").length >= 32 &&
-    get("AIRA_REALTIME_BRIDGE_SECRET").length >= 32;
+  return !!get("ELEVENLABS_AGENT_ID") && !!get("ELEVENLABS_API_KEY");
 }
 export async function conversationToken(get: Env, fetcher = fetch) {
   const r = await fetcher(
