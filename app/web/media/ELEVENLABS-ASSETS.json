@@ -1,0 +1,14 @@
+{
+  "package": "@elevenlabs/client",
+  "version": "1.28.0",
+  "registryTarball": "https://registry.npmjs.org/@elevenlabs/client/-/client-1.28.0.tgz",
+  "registryIntegrity": "sha512-T0Gh3Hq/AfO7lq1ym4uvBLsHR/RbcHiDO6uPC9q4VA11IPWfAp3OXmucqDTc3ZDBzkcpvII7sJXIl4DtPkwAww==",
+  "repository": {
+    "url": "git+https://github.com/elevenlabs/packages.git",
+    "type": "git",
+    "directory": "packages/client"
+  },
+  "bundleSha256": "cfccb4799627b4966153ada964744d31fce3aa6d0e343e5931d3ab5ed1f30b79",
+  "embeddedLivekitVersion": "2.21.0",
+  "verifiedOn": "2026-10-16"
+}

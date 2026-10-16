@@ -143,7 +143,7 @@ class _ShellState extends State<AiraShell> with WidgetsBindingObserver {
           children: [
             if (wide)
               Container(
-                width: ctl.largerText ? 248 : 224,
+                width: ctl.largerText ? 224 : 208,
                 decoration: const BoxDecoration(
                   color: Color(0xFFF1F3EB),
                   border: Border(right: BorderSide(color: AiraColors.line)),

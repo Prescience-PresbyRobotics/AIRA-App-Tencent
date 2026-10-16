@@ -2,10 +2,18 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:web/web.dart' as web;
+
 import 'media_types.dart';
 
+@JS('airaMedia.prepareRealtime')
+external JSPromise<JSAny?> _prepareRealtime();
+@JS('airaMedia.startRealtime')
+external JSPromise<JSString> _startRealtime(JSString config);
+@JS('airaMedia.setMicMuted')
+external void _setMicMuted(JSBoolean muted);
 @JS('airaMedia.snapshot')
 external JSString _snapshot();
 @JS('airaMedia.attachPreview')
@@ -32,8 +40,10 @@ external void _stopAll();
 class AiraMediaController extends ChangeNotifier {
   AiraMediaController() {
     _refresh();
-    _timer =
-        Timer.periodic(const Duration(milliseconds: 250), (_) => _refresh());
+    _timer = Timer.periodic(
+      const Duration(milliseconds: 250),
+      (_) => _refresh(),
+    );
   }
   AiraMediaState state = const AiraMediaState();
   Timer? _timer;
@@ -46,14 +56,36 @@ class AiraMediaController extends ChangeNotifier {
       final encoded = _snapshot().toDart;
       if (_previous == encoded) return;
       _previous = encoded;
-      state =
-          AiraMediaState.fromJson(jsonDecode(encoded) as Map<String, dynamic>);
+      state = AiraMediaState.fromJson(
+        jsonDecode(encoded) as Map<String, dynamic>,
+      );
       notifyListeners();
     } catch (_) {
       state = const AiraMediaState(
-          error: 'Browser media could not load. Please refresh or use text.',
-          detection: 'unavailable');
+        error: 'Browser media could not load. Please refresh or use text.',
+        detection: 'unavailable',
+      );
     }
+  }
+
+  Future<void> prepareRealtime() async {
+    if (_disposed) return;
+    await _prepareRealtime().toDart;
+  }
+
+  Future<void> startRealtime(Map<String, dynamic> config) async {
+    if (_disposed) return;
+    final result = jsonDecode(
+      (await _startRealtime(jsonEncode(config).toJS).toDart).toDart,
+    ) as Map<String, dynamic>;
+    _refresh();
+    if (result['error'] != null) throw StateError(result['error'] as String);
+  }
+
+  void setMicMuted(bool muted) {
+    if (_disposed) return;
+    _setMicMuted(muted.toJS);
+    _refresh();
   }
 
   Future<void> startCamera() async {
@@ -80,13 +112,15 @@ class AiraMediaController extends ChangeNotifier {
 
   Future<RecordedAudio> finishRecording() async {
     if (_disposed) throw StateError('The call has ended.');
-    final result = jsonDecode((await _finishRecording().toDart).toDart)
-        as Map<String, dynamic>;
+    final result = jsonDecode(
+      (await _finishRecording().toDart).toDart,
+    ) as Map<String, dynamic>;
     _refresh();
     if (result['error'] != null) throw StateError(result['error'] as String);
     return RecordedAudio(
-        bytes: base64Decode(result['base64'] as String),
-        mimeType: result['mimeType'] as String);
+      bytes: base64Decode(result['base64'] as String),
+      mimeType: result['mimeType'] as String,
+    );
   }
 
   void cancelRecording() {
@@ -94,8 +128,10 @@ class AiraMediaController extends ChangeNotifier {
     _refresh();
   }
 
-  Future<void> playAudio(Uint8List bytes,
-      [String mimeType = 'audio/mpeg']) async {
+  Future<void> playAudio(
+    Uint8List bytes, [
+    String mimeType = 'audio/mpeg',
+  ]) async {
     if (_disposed) return;
     final playback = _playAudio(base64Encode(bytes).toJS, mimeType.toJS).toDart;
     _refresh();
@@ -130,8 +166,8 @@ class AiraCameraPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => HtmlElementView.fromTagName(
-        tagName: 'video',
-        onElementCreated: (element) =>
-            _attachPreview(element as web.HTMLVideoElement),
-      );
+    tagName: 'div',
+    onElementCreated: (element) =>
+        _attachPreview(element as web.HTMLDivElement),
+  );
 }

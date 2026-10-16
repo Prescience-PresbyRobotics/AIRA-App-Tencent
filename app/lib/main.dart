@@ -34,7 +34,7 @@ class AiraApp extends StatelessWidget {
         data: MediaQuery.of(context).copyWith(
           textScaler: AiraTextScaler(
             MediaQuery.textScalerOf(context),
-            factor: controller.largerText ? 1 : .9,
+            factor: controller.largerText ? .9 : .78,
           ),
         ),
         child: child!,

@@ -1,10 +1,10 @@
 # AIRA backend — controlled prototype
 
-Implemented 14 October; deployed to the confirmed AIRA-App-Tencent Supabase project on 15 October 2026. Project `yzcnccjlwgrkxokgjtkv` has migration `202610140001`, 16 RLS-protected app tables, `aira-api`, `aira-worker`, private worker/signing secrets and a minute-based Cron job. The connected frontend is deployed to Firebase project `aira-app-tencent` at [aira-app-tencent.web.app](https://aira-app-tencent.web.app).
+Implemented 14 October; deployed to the confirmed AIRA-App-Tencent Supabase project on 15 October 2026. Project `yzcnccjlwgrkxokgjtkv` now has core migration `202610140001` plus realtime migration `202610160001`, RLS-protected app/session tables, `aira-api`, `aira-realtime`, `aira-worker`, private worker/signing secrets and a minute-based Cron job. The connected frontend is deployed to Firebase project `aira-app-tencent` at [aira-app-tencent.web.app](https://aira-app-tencent.web.app).
 
-Hosted authorization rejection, local/Firebase CORS, authenticated worker execution, password authentication through the hosted Auth API and live OpenAI/ElevenLabs calls were verified. The preconfirmed synthetic test account and app profile were deleted and their absence verified. **Custom SMTP, registration/confirmation/recovery email delivery and Google OAuth remain incomplete.** The Google Cloud console failed to load during OAuth setup. Browser/device flows remain to be tested. There is no external caregiver delivery adapter.
+Hosted authorization rejection, local/Firebase CORS, authenticated worker execution, password authentication through the hosted Auth API and live OpenAI/ElevenLabs calls were verified. The preconfirmed synthetic test account and app profile were deleted and their absence verified. **Google OAuth remains incomplete. Email verification stays enabled at the user’s request, and the user reports it works; no independent SMTP/email-delivery test was performed. Only Forgot password is hidden.** The 16 October realtime call source and backend are deployed, with a private Jessica agent provisioned; a live provider WebSocket exchange and WebRTC token issuance passed on 16 October. These do not establish browser microphone/WebRTC or physical-device behavior. The Google Cloud console failed to load during OAuth setup. Browser/device flows remain to be tested. There is no external caregiver delivery adapter.
 
-The confirmed environment uses `OPENAI_MODEL=gpt-4.1-mini`, ElevenLabs voice `La9lzDJ3mmfNhhQA06WM`, STT model `scribe_v2` and TTS model `eleven_multilingual_v2`. Provider keys stay in Edge Function secrets. Supabase Auth Site URL is `https://aira-app-tencent.web.app`; redirect URLs allow localhost port 8080 and this project's `web.app`/`firebaseapp.com` domains. CORS allows their exact origins. Email confirmation remains enabled and new passwords require 10 characters.
+The confirmed environment uses `OPENAI_MODEL=gpt-4.1-mini`, ElevenLabs voice `La9lzDJ3mmfNhhQA06WM`, STT model `scribe_v2` and TTS model `eleven_multilingual_v2`. Provider keys stay in Edge Function secrets. Supabase Auth Site URL is `https://aira-app-tencent.web.app`; redirect URLs allow localhost port 8080 and this project's `web.app`/`firebaseapp.com` domains. CORS allows their exact origins. Email confirmation remains enabled and new passwords require 10 characters. The user explicitly confirmed on 16 October that verification is working and must stay enabled. Only the Forgot password entry is hidden; signup retains the check-your-email step. The user’s report is separate from this work’s API tests, which do not test email delivery.
 
 The backend accepts Supabase's injected modern `SUPABASE_SECRET_KEYS` dictionary (default key), older `SUPABASE_SECRET_KEY`, or legacy `SUPABASE_SERVICE_ROLE_KEY`. Optional `AIRA_SUPABASE_SECRET_KEY_NAME` selects a named dictionary key. Modern secret keys are sent in `apikey`, while Auth verification retains the user's Bearer token.
 
@@ -23,7 +23,8 @@ The backend accepts Supabase's injected modern `SUPABASE_SECRET_KEYS` dictionary
   `store:false`. Replies are buffered and screened using strict structured
   output before release. Invalid/unavailable screening substitutes fixed support
   copy; unchecked replies are not displayed or spoken.
-- ElevenLabs transcription and speech. Speech requires a signed five-minute
+- A realtime ElevenLabs session route plus an `aira-realtime` custom-LLM gate reuse the same screened OpenAI path. Account/consent-bound session tokens expire after 15 minutes. The gate holds the full response until approved, then returns it to ElevenLabs for speech; expect additional latency. Provider WebSocket behavior is verified; browser microphone/WebRTC and physical-device behavior remain pending.
+- ElevenLabs bounded transcription and speech remain available. Speech requires a signed five-minute
   approved-reply token bound to account, request and current consent version.
   The API accepts no arbitrary text-to-speech request.
 - Transactional request/occurrence/action deduplication; automatic urgent
@@ -41,7 +42,7 @@ The confirmed project above is already provisioned. Use these steps for another 
    deliberately, and record its project reference and URL. Keep its database
    password private.
 2. In Auth, enable email/password, email confirmation and password recovery.
-   Configure your own SMTP sender before public registration. Keep anonymous
+   Configure your own SMTP sender for confirmation/recovery. The current hosted project keeps confirmation enabled by the user’s confirmed choice, with verification reported working. Independently verify delivery when provisioning a new environment. Keep anonymous
    sign-in disabled for this implementation.
 3. Create a Google OAuth web client in Google Cloud. Configure its consent
    screen and permitted audience, using only basic identity scopes (`openid`,
@@ -100,6 +101,7 @@ supabase link --project-ref YOUR_PROJECT_REF
 supabase db push
 supabase secrets set --env-file supabase/.env
 supabase functions deploy aira-api
+supabase functions deploy aira-realtime
 supabase functions deploy aira-worker
 ```
 
@@ -114,6 +116,22 @@ anyone. Code rollback means redeploying the previous reviewed function sources;
 database rollback requires a reviewed forward migration or database restore, not
 deletion of migration history. Backups/provider retention are distinct from
 application-level deletion.
+
+## Realtime voice setup — source added 16 October
+
+Flutter uses the locally bundled `@elevenlabs/client` **1.28.0** browser SDK. Audio connects to ElevenLabs; the provider calls `/functions/v1/aira-realtime/chat/completions` for conversational output. That function authenticates the provider bridge secret, verifies a signed live-session token, rechecks account/consent/call status and invokes the existing `aira-api` screened OpenAI pipeline. It discards provider system prompts and releases only a complete approved response or the existing fixed safe fallback. The approved text is returned in an OpenAI-compatible response/SSE envelope; raw model tokens are never streamed into speech. This buffering adds latency.
+
+For a fresh environment, apply all migrations, deploy `aira-api` and `aira-realtime`, and configure:
+
+- `ELEVENLABS_AGENT_ID`: the private, authenticated agent ID.
+- `AIRA_CALL_SIGNING_SECRET` and `AIRA_REALTIME_BRIDGE_SECRET`: independent high-entropy server secrets, at least 32 characters; keep them out of Flutter and logs.
+- Existing OpenAI/ElevenLabs keys, voice ID and explicit `OPENAI_MODEL` remain required.
+
+`aira-voice-setup` is a one-time protected provisioning helper: deploy it explicitly, invoke it with the existing worker secret, save the returned agent ID as `ELEVENLABS_AGENT_ID`, then remove the helper deployment. It creates an agent; it is not a repeatable update operation. Its source selects the screened custom LLM with backup LLM disabled, `eleven_flash_v2` speech for the English agent, a 900-second call cap, patient turn-taking and authenticated token access. Current settings request `record_voice:false`, `retention_days:0`, `delete_transcript_and_pii:true`, `delete_audio:true` and `zero_retention_mode:false`. The provider rejected special zero-retention mode with a custom LLM. Zero-day retention schedules deletion; it is not proof of instant deletion or zero logging. The saved agent was checked for authentication, the custom LLM, no fallback, recording off and zero-day retention. Actual deletion behavior and account terms still need review before real use. The temporary `aira-voice-setup` deployment was removed after the test. Do not expose the worker or bridge secrets in shell history or browser configuration.
+
+Start calls only after the user's action. Flutter receives a short-lived conversation token plus signed custom-LLM context; End stops local media immediately and invalidates server call state. Fresh consented face labels and explicit feelings travel through the context endpoint, not as camera frames. Clearing camera/analysis sends null; self-report stays separate from the facial estimate. The browser also bundles local face-api.js **0.22.2** and model assets. A video call combines realtime audio, Aira's animated mascot and the user's optional local camera; it is not remote generated video.
+
+The chosen voice `La9lzDJ3mmfNhhQA06WM` works with the older TTS endpoint but the provider rejected it as an instant voice clone for this custom-LLM agent. A private agent is now provisioned with Jessica (`cgSgspJ2msm6clMCkdW9`) as the user-confirmed voice; the original voice remains configured for the older TTS endpoint. The realtime backend is deployed. A live provider WebSocket connection returned the greeting, a matching spoken reply and an interruption event; WebRTC token issuance, direct screened bridge output and End/token revocation also passed. Browser microphone/WebRTC, reconnect, echo, physical-device cleanup and actual retention behavior remain verification gates. [ElevenLabs retention guidance](https://elevenlabs.io/docs/eleven-agents/customization/privacy/retention) describes scheduled deletion, which is separate from AIRA’s database storage toggle. The bounded STT/TTS and provider WebSocket checks do not close those browser/device gates.
 
 ## Enable due work and retention cleanup
 
@@ -174,7 +192,8 @@ wrapper/ID fields below are camelCase.
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /v1/me`                                     | `{profile,preferences,capabilities,roles}`. `profile.consent_version` is the current privacy version.                                                                                                                                                                                                                                        |
 | `PATCH /v1/preferences`                          | Profile: `display_name`, `timezone`, `text_scale` (1–2), `reduced_motion`, `onboarded`, `locale:'en'`. Consent choices can use canonical `consents:{...}` or flat Flutter aliases below. Returns updated `{profile,preferences}`.                                                                                                            |
-| `POST /v1/messages`                              | `{clientMessageId,text,mode,conversationId?,contextVersion?,context?:[{role,text}],cueSummary?:{label,observedAt},selfReportedFeeling?}`. Returns `{conversationId,messageId,text,status,speechToken,privacyVersion,provider}`. Max 2,000 characters, 10 submissions/minute and 20/hour/account. `status` is approved/support/safe_fallback. |
+| `POST /v1/messages`                              | `{clientMessageId,text,mode,conversationId?,contextVersion?,context?:[{role,text}],introductionShown?,cueSummary?:{label,observedAt},selfReportedFeeling?}`. Returns `{conversationId,messageId,text,status,speechToken,privacyVersion,provider}`. Max 2,000 characters, 10 submissions/minute and 20/hour/account. `status` is approved/support/safe_fallback. |
+| `GET /v1/messages/:clientMessageId/status` | Owner-scoped acknowledgement: `{status:'processing' or 'completed' or 'failed' or 'not_found',createdAt?}`. Delivered requires a server record; Read means an actual Aira reply returned, not human attention. |
 | `POST /v1/audio/transcriptions`                  | `{audioBase64,mimeType,locale:'en'}` → `{text,editable:true,provider:'elevenlabs'}`. Max 5,000,000 decoded bytes; base MIME supports webm/mp4/wav/ogg/mpeg, with codec suffixes normalized.                                                                                                                                                  |
 | `POST /v1/speech`                                | `{speechToken}` → `{audioBase64,mimeType:'audio/mpeg',provider:'elevenlabs'}`. Speech/transcription share a 40-request/hour/account limit.                                                                                                                                                                                                   |
 | `GET /v1/memories`                               | `{memories:[{id,text,category,version,expires_at,...}]}`.                                                                                                                                                                                                                                                                                    |
@@ -189,6 +208,8 @@ wrapper/ID fields below are camelCase.
 | `GET /v1/events`                                 | `{events:[{id,kind,label,state,action_version,expires_at,...}]}` with pending/due/snoozed foreground records only.                                                                                                                                                                                                                           |
 | `POST /v1/medication-occurrences/:id/respond` | `{action:'taken' or 'skip' or 'snooze',requestId,expectedVersion,nextNotifyAt?}` → `{event}`. Version is `action_version`; Taken is user self-report. |
 | `POST /v1/invitations/:id/respond` | `{action:'accept' or 'decline',requestId,expectedVersion}` → `{event}`. Acceptance creates `event.conversation_id`; decline pauses social invitations for 24 hours. |
+| `POST /v1/calls/session` | `{mode:'voice' or 'video'}` → `{conversationId,conversationToken,customLlmExtraBody:{aira_session_token},dynamicVariables:{aira_name},expiresAt}`. Authenticated, short-lived realtime session; no provider API key returned. |
+| `PATCH /v1/calls/:id/context` | `{cueSummary?:{label,observedAt},selfReportedFeeling?}`. Both accept null to clear; fresh labels require current face consent, and explicit feelings take priority. |
 | `POST /v1/calls` | `{mode:'voice' or 'video'}` → `{conversation}`. Start only after explicit acceptance. |
 | `POST /v1/calls/:id/end`                         | Idempotent `{ended:true}`. Client must stop every media track and clear buffers locally.                                                                                                                                                                                                                                                     |
 | `GET /v1/measurements/prompt`                    | `{prompt:{id,period_start,period_end,timezone,question_version,question,optional:true},response}`. May return `prompt:null` until next eligible week after expiry.                                                                                                                                                                           |
@@ -252,7 +273,7 @@ are not submitted to these real metrics.
 ## Verification
 
 ```sh
-deno check supabase/functions/aira-api/index.ts supabase/functions/aira-worker/index.ts
+deno check supabase/functions/aira-api/index.ts supabase/functions/aira-realtime/index.ts supabase/functions/aira-worker/index.ts
 deno test -A supabase/tests/
 ```
 
@@ -268,6 +289,12 @@ route. These tests do not establish hosted Supabase Auth behavior, real provider
 quality, medical accuracy or device accessibility.
 
 ### Live integration smoke test
+
+On 16 October, 30 Deno tests and 43 Flutter tests passed. Browser UI checks verified the greeting/cards; the final frontend, including signup verification wording and media cache updates, is built and deployed to Firebase Hosting.
+
+The 16 October live synthetic run passed Auth/API access and screened OpenAI (6.62 s), original-voice TTS (4.39 s), STT (2.01 s), WebRTC token issuance (1.90 s), and direct screened custom-LLM bridge output (5.78 s). An actual ElevenLabs WebSocket connection returned its greeting and a matching reply with 159,760 audio bytes, plus an interruption event; the whole connection lasted 10.9 s. End/token revocation and synthetic-account cleanup were verified. These are individual observations, not a latency guarantee. Private-agent auth, custom LLM with no fallback, `record_voice:false` and `retention_days:0` were confirmed in saved configuration.
+
+The realtime test was an ad hoc provider WebSocket check plus WebRTC token issuance. It did **not** exercise browser microphone/WebRTC or a physical phone, and there is no committed realtime smoke script. The commands below run the existing bounded Auth/OpenAI/STT/TTS baseline only.
 
 The 15 October 2026 synthetic run passed CORS, unauthenticated rejection, password sign-in through the hosted Auth API, profile/default-consent checks, staff-access denial, a screened approved OpenAI response, ElevenLabs MP3 synthesis and transcription of that synthetic audio. Cleanup removed the temporary Auth account and app profile and verified their absence.
 
@@ -295,14 +322,14 @@ Cleanup verifies the account's synthetic marker before deleting it. Keys, sessio
 
 ## Known limits and next work
 
-- Supabase provisioning, provider credentials and Firebase HTTPS deployment are complete for the confirmed project. A synthetic backend test verified hosted password authentication and live OpenAI/ElevenLabs calls. Custom SMTP, confirmation/recovery email delivery, Google OAuth and hosted browser/device end-to-end tests remain to do.
+- Supabase provisioning, provider credentials and Firebase HTTPS deployment are complete for the confirmed project. A synthetic backend test verified hosted password authentication and live OpenAI/ElevenLabs calls. Confirmation remains enabled by the user’s instruction, with email verification reported working by the user. Independent email-delivery tests, Google OAuth and hosted browser/device end-to-end tests remain to do; only Forgot password is hidden.
 - The safety classifier/rules are a conservative **unvalidated prototype**, not
   a clinical instrument. English urgency matching can miss wording; exact
   urgency evaluation, latency targets, reviewer staffing and local help
   resources remain release gates. The fixed support response makes no
   external-contact claim. Provider timeouts may take up to 25 seconds per step;
   TRD support-response latency is not yet met.
-- Continuous ElevenLabs calls, interruptions/reconnect, recurring
+- Realtime provider WebSocket greeting/reply/audio and interruption-event handling passed. Browser microphone/WebRTC, realistic interruption/reconnect, echo, the 15-minute cap and actual provider deletion still need verification; saved privacy settings alone do not establish deletion timing. Recurring
   medication/routine schedules, push delivery, durable multi-day follow-ups and
   real recipient messaging are not implemented. Current schedules are confirmed
   **one-time** occurrences inside their 24-hour retention window.

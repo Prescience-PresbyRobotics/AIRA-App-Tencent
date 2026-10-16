@@ -37,3 +37,7 @@ verify_jwt = false
 [functions.aira-worker]
 # Separate constant-time worker secret check; this is never public authorization.
 verify_jwt = false
+
+[functions.aira-realtime]
+# Verifies provider secret plus signed, user-bound, revocable call session.
+verify_jwt = false

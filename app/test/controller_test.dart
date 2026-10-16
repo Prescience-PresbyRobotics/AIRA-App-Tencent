@@ -402,4 +402,82 @@ void main() {
       expect(controller.lonelyDays, isNull);
     },
   );
+  test(
+    'realtime session arriving after End is closed without reopening the call',
+    () async {
+      final session = Completer<Map<String, dynamic>>();
+      api.respond = (call) async {
+        if (call.path == '/calls/session') return session.future;
+        if (call.path == '/calls/late-call/end') return {'ended': true};
+        throw StateError('Unexpected request ${call.path}');
+      };
+      final opening = controller.beginRealtimeCall('voice');
+      final rejected = expectLater(opening, throwsA(isA<AiraException>()));
+      await controller.endCall();
+      session.complete({
+        'conversationId': 'late-call',
+        'conversationToken': 'temporary-token',
+      });
+      await rejected;
+      expect(controller.activeCallId, isEmpty);
+      expect(controller.conversationId, isEmpty);
+      expect(api.calls.last.path, '/calls/late-call/end');
+    },
+  );
+
+  test(
+    'realtime session from a previous identity never opens in preview',
+    () async {
+      final session = Completer<Map<String, dynamic>>();
+      api.respond = (_) => session.future;
+      final opening = controller.beginRealtimeCall('video');
+      final rejected = expectLater(opening, throwsA(isA<AiraException>()));
+      controller.startPreview();
+      session.complete({
+        'conversationId': 'prior-account-call',
+        'conversationToken': 'private-token',
+      });
+      await rejected;
+      expect(controller.preview, isTrue);
+      expect(controller.activeCallId, isEmpty);
+      expect(controller.conversationId, isEmpty);
+      expect(
+        api.calls,
+        hasLength(1),
+        reason: 'Never clean up using a different account token',
+      );
+    },
+  );
+
+  test('call context explicitly clears both cues and End removes temporary buffers', () async {
+    api.respond = (_) async => {};
+    controller.activeCallId = 'current-call';
+    controller.conversationId = 'current-call';
+    await controller.publishCallContext(
+      cueSummary: {'label': 'happy'},
+      selfReportedFeeling: 'sad',
+    );
+    expect(api.calls.last.path, '/calls/current-call/context');
+    expect(api.calls.last.data!['selfReportedFeeling'], 'sad');
+    await controller.publishCallContext();
+    expect(api.calls.last.data, {
+      'cueSummary': null,
+      'selfReportedFeeling': null,
+    });
+    controller.messages.add(
+      ChatTurn(text: 'Private spoken turn', fromAira: false),
+    );
+    controller.outbox.add(
+      ChatTurn(
+        text: 'Waiting spoken turn',
+        fromAira: false,
+        delivery: MessageDelivery.sending,
+      ),
+    );
+    await controller.endCall();
+    expect(controller.messages, isEmpty);
+    expect(controller.outbox, isEmpty);
+    expect(controller.activeCallId, isEmpty);
+    expect(api.calls.last.path, '/calls/current-call/end');
+  });
 }

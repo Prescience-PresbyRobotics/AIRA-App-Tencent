@@ -20,7 +20,11 @@ void main() {
       await tester.tap(find.text('Explore the interface'));
       await tester.pump();
       expect(find.text('Hello, I’m AIRA.'), findsOneWidget);
-      await tester.enterText(find.byType(TextField), 'Mei');
+      expect(
+        find.byType(TextField),
+        findsNothing,
+        reason: 'Name is asked in chat, not onboarding',
+      );
       await tester.ensureVisible(find.text('Continue'));
       await tester.tap(find.text('Continue'));
       await tester.pump();
@@ -33,7 +37,7 @@ void main() {
       await tester.tap(find.text('Let’s chat'));
       await tester.pump();
       expect(controller.onboarded, true);
-      expect(find.textContaining('Hello, Mei.'), findsOneWidget);
+      expect(find.text(airaIntroduction), findsOneWidget);
       expect(find.textContaining('AI not connected'), findsOneWidget);
       await tester.enterText(find.byType(TextField), 'Hello AIRA');
       await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
@@ -81,16 +85,18 @@ void main() {
     await controller.finishOnboarding('Mei', {});
     controller.setTab(2);
     await tester.pumpWidget(AiraApp(controller: controller));
-    final heading = find.text('Make yourself comfortable');
+    await tester.tap(find.text('Appearance'));
+    await tester.pumpAndSettle();
+    final heading = find.text('Larger text');
     final compactHeight = tester.getSize(find.byType(AiraCard).first).height;
     final compactScale = MediaQuery.textScalerOf(tester.element(heading));
-    expect(compactScale.scale(20), 18);
+    expect(compactScale.scale(20), closeTo(15.6, .0001));
     expect(controller.largerText, false);
 
     await tester.tap(find.text('Larger text'));
     await tester.pumpAndSettle();
     expect(controller.largerText, true);
-    expect(MediaQuery.textScalerOf(tester.element(heading)).scale(20), 20);
+    expect(MediaQuery.textScalerOf(tester.element(heading)).scale(20), 18);
     expect(
       tester.getSize(find.byType(AiraCard).first).height,
       greaterThan(compactHeight),

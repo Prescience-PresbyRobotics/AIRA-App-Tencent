@@ -12,11 +12,11 @@ class AiraColors {
   static const line = Color(0xFFDFE3DA);
 }
 
-/// The roomy values are the original AIRA layout. Compact mode reduces
+/// The roomy values preserve the previous default AIRA layout. Compact mode reduces
 /// whitespace without scaling interactive hit areas below 48 logical pixels.
 class AiraLayout extends ThemeExtension<AiraLayout> {
   final double spacingFactor;
-  const AiraLayout({this.spacingFactor = .8});
+  const AiraLayout({this.spacingFactor = .65});
 
   static AiraLayout of(BuildContext context) =>
       Theme.of(context).extension<AiraLayout>() ?? const AiraLayout();
@@ -61,10 +61,10 @@ class AiraTextScaler extends TextScaler {
 }
 
 ThemeData airaTheme({bool largerText = false}) => ThemeData(
-  extensions: [AiraLayout(spacingFactor: largerText ? 1 : .8)],
+  extensions: [AiraLayout(spacingFactor: largerText ? .8 : .65)],
   materialTapTargetSize: MaterialTapTargetSize.padded,
   visualDensity: VisualDensity.standard,
-  navigationBarTheme: NavigationBarThemeData(height: largerText ? 80 : 72),
+  navigationBarTheme: NavigationBarThemeData(height: largerText ? 72 : 64),
   useMaterial3: true,
   colorScheme: ColorScheme.fromSeed(
     seedColor: AiraColors.forest,
@@ -105,11 +105,12 @@ ThemeData airaTheme({bool largerText = false}) => ThemeData(
     labelLarge: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
   ),
   inputDecorationTheme: InputDecorationTheme(
+    constraints: const BoxConstraints(minHeight: 48),
     filled: true,
     fillColor: Colors.white,
     contentPadding: EdgeInsets.symmetric(
-      horizontal: largerText ? 20 : 16,
-      vertical: largerText ? 19 : 14,
+      horizontal: largerText ? 16 : 14,
+      vertical: largerText ? 14 : 11,
     ),
     border: OutlineInputBorder(
       borderRadius: BorderRadius.circular(18),
@@ -126,22 +127,22 @@ ThemeData airaTheme({bool largerText = false}) => ThemeData(
   ),
   filledButtonTheme: FilledButtonThemeData(
     style: FilledButton.styleFrom(
-      minimumSize: largerText ? const Size(56, 56) : const Size(48, 48),
+      minimumSize: const Size(48, 48),
       padding: EdgeInsets.symmetric(
-        horizontal: largerText ? 24 : 20,
-        vertical: largerText ? 16 : 12,
+        horizontal: largerText ? 20 : 16,
+        vertical: largerText ? 12 : 9,
       ),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
     ),
   ),
   outlinedButtonTheme: OutlinedButtonThemeData(
     style: OutlinedButton.styleFrom(
-      minimumSize: largerText ? const Size(56, 56) : const Size(48, 48),
+      minimumSize: const Size(48, 48),
       side: const BorderSide(color: AiraColors.line),
       foregroundColor: AiraColors.ink,
       padding: EdgeInsets.symmetric(
-        horizontal: largerText ? 20 : 16,
-        vertical: largerText ? 16 : 12,
+        horizontal: largerText ? 16 : 14,
+        vertical: largerText ? 12 : 9,
       ),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
     ),

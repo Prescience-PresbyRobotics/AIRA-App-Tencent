@@ -5,14 +5,16 @@
   const state = {
     camera: 'off', microphone: 'off', detection: 'off', detectionEnabled: false,
     emotion: null, reason: 'Detection off', faceCount: 0, observedAt: null,
+    faceBox: null, faceObservedAt: null, frameAspect: null,
     inferenceMs: null, playing: false, suspended: false, error: null, recordingStartedAt: null,
     model: 'face-api.js/0.22.2/FaceExpressionNet',
   };
   let cameraStream, microphoneStream, recorder, recordingDone;
-  let sourceVideo, preview, worker, inferenceTimer, staleTimer, workerTimer;
+  let sourceVideo, preview, previewHost, faceOverlay, faceLabel, previewResize, worker, inferenceTimer, staleTimer, workerTimer;
   let recordingTimer, player, playbackUrl, playbackResolve;
   let cameraEpoch = 0, recordingEpoch = 0, detectionEpoch = 0, playbackEpoch = 0;
   let recordingChunks = [], recordingBytes = 0, recordingType = '';
+  let realtimeModule, realtimeEpoch = 0;
   let busy = false, frameId = 0, lastVideoTime = -1, samples = [];
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d', {willReadFrequently: true});
@@ -26,6 +28,8 @@
     state.reason = reason;
     state.detection = detection;
     samples = [];
+    state.faceBox = null; state.faceObservedAt = null;
+    drawFace();
   }
   function stopTracks(stream) { stream?.getTracks().forEach(track => track.stop()); }
   function mediaError(error, kind) {
@@ -40,17 +44,49 @@
     state.suspended = false;
     state.error = null;
   }
-  function attachPreview(element) {
-    preview = element;
-    preview.autoplay = true;
-    preview.muted = true;
-    preview.playsInline = true;
-    preview.setAttribute('aria-label', 'Your private camera preview');
-    preview.style.cssText = 'width:100%;height:100%;object-fit:cover;transform:scaleX(-1);background:#d8e5df;';
-    if (cameraStream) {
-      preview.srcObject = cameraStream;
-      preview.play().catch(() => {});
+  // All coordinates originate from the local model, before preview mirroring.
+  // Cover cropping and mirroring are applied to the same host as the video.
+  function projectFace(box, aspect, width, height) {
+    const drawnWidth = Math.max(width, height * aspect);
+    const drawnHeight = drawnWidth / aspect;
+    return {x: width - ((width - drawnWidth) / 2 + (box.x + box.width) * drawnWidth),
+      y: (height - drawnHeight) / 2 + box.y * drawnHeight,
+      width: box.width * drawnWidth, height: box.height * drawnHeight};
+  }
+  function drawFace() {
+    if (!faceOverlay || !previewHost) return;
+    const box = state.faceBox;
+    if (!box || !state.detectionEnabled || state.camera !== 'on') {
+      faceOverlay.style.display = 'none'; return;
     }
+    const rect = projectFace(box, state.frameAspect, previewHost.clientWidth, previewHost.clientHeight);
+    faceOverlay.style.display = 'block';
+    faceOverlay.style.left = `${rect.x}px`; faceOverlay.style.top = `${rect.y}px`;
+    faceOverlay.style.width = `${rect.width}px`; faceOverlay.style.height = `${rect.height}px`;
+    faceLabel.textContent = state.emotion ? `AI estimate: ${state.emotion}`
+      : state.detection === 'detecting' ? 'Reading expression…' : 'Expression uncertain';
+  }
+  function attachPreview(element) {
+    if (element !== previewHost) {
+      previewResize?.disconnect();
+      previewHost = element;
+      previewHost.style.cssText = 'position:relative;width:100%;height:100%;overflow:hidden;background:#4f4c60;';
+      preview = document.createElement('video');
+      preview.autoplay = true; preview.muted = true; preview.playsInline = true;
+      preview.setAttribute('aria-label', 'Your private camera preview');
+      preview.style.cssText = 'width:100%;height:100%;object-fit:cover;transform:scaleX(-1);';
+      faceOverlay = document.createElement('div');
+      faceOverlay.style.cssText = 'display:none;position:absolute;box-sizing:border-box;border:2px solid #b7ffd8;border-radius:10px;pointer-events:none;';
+      faceLabel = document.createElement('span');
+      faceLabel.style.cssText = 'position:absolute;left:-2px;bottom:100%;max-width:260px;white-space:nowrap;border-radius:5px;background:#163c32;color:white;font:600 13px system-ui;padding:4px 7px;';
+      faceOverlay.appendChild(faceLabel);
+      previewHost.replaceChildren(preview, faceOverlay);
+      if (window.ResizeObserver) {
+        previewResize = new ResizeObserver(drawFace); previewResize.observe(previewHost);
+      }
+    }
+    if (cameraStream) { preview.srcObject = cameraStream; preview.play().catch(() => {}); }
+    drawFace();
   }
   async function startCamera() {
     if (state.camera === 'on' || state.camera === 'starting') return;
@@ -75,7 +111,7 @@
         if (cameraStream === stream) stopCamera();
       }));
       state.camera = 'on';
-      if (preview) attachPreview(preview);
+      if (previewHost) attachPreview(previewHost);
     } catch (error) {
       if (epoch !== cameraEpoch) return;
       stopCamera();
@@ -125,6 +161,8 @@
       if (face.score < 0.65 || face.width < 48 || face.height < 48) {
         clearEmotion('Unable to detect — face is unclear or too far away');
       } else {
+        state.faceBox = face.box; state.frameAspect = result.frameAspect;
+        state.faceObservedAt = result.sampledAt;
         samples.push({at: result.sampledAt, scores: face.expressions});
         samples = samples.filter(sample => now - sample.at <= 3000);
         const average = labels.map(label => ({label, value: samples.reduce((total, sample) => total + (sample.scores[label] || 0), 0) / samples.length}));
@@ -142,6 +180,7 @@
         }
       }
     }
+    drawFace();
     // Slow devices naturally receive fewer frames; no overlapping inference.
     inferenceTimer = setTimeout(captureFrame, Math.max(500, result.elapsedMs));
   }
@@ -175,7 +214,7 @@
     clearEmotion('Loading the expression model…', 'loading');
     const epoch = detectionEpoch;
     try {
-      worker = new Worker(new URL('emotion_worker.js', base));
+      worker = new Worker(new URL('emotion_worker.js?v=20261016', base));
       worker.onmessage = ({data}) => {
         if (epoch !== detectionEpoch || !state.detectionEnabled) return;
         if (data.type === 'loaded') {
@@ -189,7 +228,7 @@
       worker.postMessage({type: 'load'});
       workerTimer = setTimeout(modelUnavailable, 30000);
       staleTimer = setInterval(() => {
-        if (state.observedAt && Date.now() - state.observedAt > 5000) {
+        if (state.faceObservedAt && Date.now() - state.faceObservedAt > 5000) {
           clearEmotion('Unable to detect — waiting for a fresh camera image');
         }
       }, 250);
@@ -318,8 +357,34 @@
       stopPlayback();
     }
   }
+  function prepareRealtime() {
+    if (window.airaRealtime) return window.airaRealtime.prepare();
+    if (!realtimeModule) realtimeModule = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = new URL('realtime_client.js?v=20261016', base).href;
+      script.onload = resolve;
+      script.onerror = () => { realtimeModule = null; script.remove(); reject(new Error('Voice software could not load.')); };
+      document.head.appendChild(script);
+    });
+    return realtimeModule.then(() => window.airaRealtime.prepare());
+  }
+  async function startRealtime(encoded) {
+    const request = ++realtimeEpoch;
+    try {
+      ensureMedia(); stopPlayback(); cancelRecording();
+      await prepareRealtime();
+      if (request !== realtimeEpoch || document.hidden) return JSON.stringify({cancelled: true});
+      await window.airaRealtime.start(JSON.parse(encoded));
+      if (request !== realtimeEpoch) return JSON.stringify({cancelled: true});
+      return JSON.stringify({connected: window.airaRealtime.snapshot().realtimeStatus === 'connected'});
+    } catch (_) {
+      return JSON.stringify({error: window.airaRealtime?.snapshot().realtimeError || 'The live call could not start. Please try again.'});
+    }
+  }
+  function stopRealtime() { ++realtimeEpoch; window.airaRealtime?.stop(); }
+  function setMicMuted(value) { window.airaRealtime?.mute(value); }
   function stopAll() {
-    stopCamera(); cancelRecording(); stopPlayback();
+    stopRealtime(); stopCamera(); cancelRecording(); stopPlayback();
   }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
@@ -330,9 +395,10 @@
   window.addEventListener('pagehide', stopAll);
   window.addEventListener('offline', () => { stopAll(); state.suspended = true; state.error = 'The call was interrupted. Please reconnect and start again.'; });
   window.airaMedia = Object.freeze({
-    snapshot: () => JSON.stringify({...state, recordingSeconds: state.recordingStartedAt == null
+    snapshot: () => JSON.stringify({...state, ...window.airaRealtime?.snapshot(),
+      playing: state.playing || (window.airaRealtime?.snapshot().realtimeStatus === 'connected' && window.airaRealtime?.snapshot().callMode === 'speaking'), recordingSeconds: state.recordingStartedAt == null
       ? 0 : Math.min(45, Math.floor((Date.now() - state.recordingStartedAt) / 1000))}),
-    attachPreview, startCamera, stopCamera,
+    attachPreview, projectFace, startCamera, stopCamera, prepareRealtime, startRealtime, stopRealtime, setMicMuted,
     setDetection, startRecording, finishRecording, cancelRecording, playAudio, stopPlayback, stopAll,
   });
 })();

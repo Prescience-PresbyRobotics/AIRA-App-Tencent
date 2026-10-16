@@ -21,7 +21,13 @@ import {
   jsonBody,
   supabaseServerKey,
 } from "../_shared/runtime.ts";
-import { Providers } from "../_shared/providers.ts";
+import { FIRST_GREETING, Providers } from "../_shared/providers.ts";
+import {
+  callContext,
+  conversationToken,
+  realtimeConfigured,
+  signCall,
+} from "../_shared/realtime.ts";
 const consentAliases: Record<string, string> = {
   store_conversations: "conversation_storage",
   memory_enabled: "memory",
@@ -82,7 +88,7 @@ function capability(get: Env) {
     text: !!get("OPENAI_API_KEY") && !!get("OPENAI_MODEL"),
     voice: !!get("ELEVENLABS_API_KEY") && !!get("ELEVENLABS_VOICE_ID") &&
       get("AIRA_SPEECH_SIGNING_SECRET").length >= 32,
-    continuousVoice: false,
+    continuousVoice: realtimeConfigured(get),
     externalCaregiverDelivery: false,
     reminders: "foreground_only",
     retentionHours: 24,
@@ -139,7 +145,11 @@ function nextLocalTime(value: unknown, timeZone: string): string {
   );
 }
 
-export function createHandler(get: Env = env, fetcher: typeof fetch = fetch) {
+export function createHandler(
+  get: Env = env,
+  fetcher: typeof fetch = fetch,
+  resolveUser = authenticate,
+) {
   return async function handler(req: Request): Promise<Response> {
     const requestId = crypto.randomUUID();
     const origin = req.headers.get("origin");
@@ -176,7 +186,7 @@ export function createHandler(get: Env = env, fetcher: typeof fetch = fetch) {
           },
         });
       }
-      const user = await authenticate(req, get, fetcher);
+      const user = await resolveUser(req, get, fetcher);
       const db = new Database(
         get("SUPABASE_URL"),
         supabaseServerKey(get),
@@ -320,6 +330,19 @@ export function createHandler(get: Env = env, fetcher: typeof fetch = fetch) {
             "App access disabled and application content removed. Supabase Auth identity remains; administrator deletion is a separate action.",
         });
       }
+      const messageStatus = path.match(/^\/v1\/messages\/([^/]+)\/status$/);
+      if (messageStatus && method === "GET") {
+        const request = await db.one(
+          "message_requests",
+          `user_id=eq.${user}&client_id=eq.${
+            uuid(messageStatus[1])
+          }&expires_at=gt.${nowFilter()}`,
+        );
+        return respond({
+          status: request?.status ?? "not_found",
+          createdAt: request?.created_at ?? null,
+        });
+      }
       if (path === "/v1/messages" && method === "POST") {
         const b = await jsonBody(req);
         const text = boundedText(b.text);
@@ -390,6 +413,9 @@ export function createHandler(get: Env = env, fetcher: typeof fetch = fetch) {
                 content: m.text,
               }));
             }
+            if (!context.length && b.introductionShown === true) {
+              context = [{ role: "assistant", content: FIRST_GREETING }];
+            }
             const memories = p.consents.memory
               ? await db.request(
                 `memories?${
@@ -420,6 +446,7 @@ export function createHandler(get: Env = env, fetcher: typeof fetch = fetch) {
               memories.map((m: any) => m.text),
               cue,
               selfReportedFeeling,
+              p.display_name,
             );
             outputFlag = await live.screen(candidate, "assistant");
             if (outputAllowed(outputFlag)) {
@@ -759,6 +786,96 @@ export function createHandler(get: Env = env, fetcher: typeof fetch = fetch) {
           }),
         });
       }
+      if (path === "/v1/calls/session" && method === "POST") {
+        if (!realtimeConfigured(get)) {
+          throw new ApiError(
+            503,
+            "not_configured",
+            "Live calls are not configured yet.",
+          );
+        }
+        const b = await jsonBody(req);
+        if (!["voice", "video"].includes(b.mode)) {
+          throw new ApiError(400, "invalid_mode", "Choose voice or video.");
+        }
+        let reservation;
+        try {
+          reservation = await db.rpc("aira_reserve_call", {
+            p_user: user,
+            p_mode: b.mode,
+            p_consent_version: p.consent_version,
+          });
+        } catch (e) {
+          if (e instanceof ApiError && e.code === "rate_limited") {
+            throw new ApiError(
+              429,
+              "call_limit",
+              "End your other call before starting a new one.",
+            );
+          }
+          throw e;
+        }
+        const { conversation, session } = reservation;
+        try {
+          const expires = Date.parse(session.expires_at);
+          const token = await conversationToken(get, fetcher);
+          return respond({
+            conversationId: conversation.id,
+            conversationToken: token,
+            customLlmExtraBody: {
+              aira_session_token: await signCall({
+                user,
+                conversation: conversation.id,
+                version: session.consent_version,
+                expires,
+              }, get("AIRA_CALL_SIGNING_SECRET")),
+            },
+            dynamicVariables: { aira_name: p.display_name || "friend" },
+            expiresAt: new Date(expires).toISOString(),
+          }, 201);
+        } catch (e) {
+          // Attempt both cleanup operations even if either database request fails.
+          // The worker also removes expired/revoked sessions on its next tick.
+          await Promise.allSettled([
+            db.remove(
+              "realtime_sessions",
+              `conversation_id=eq.${conversation.id}&user_id=eq.${user}`,
+            ),
+            db.patch(
+              "conversations",
+              `id=eq.${conversation.id}&user_id=eq.${user}&ended_at=is.null`,
+              { ended_at: new Date().toISOString() },
+            ),
+          ]);
+          throw e;
+        }
+      }
+      const contextMatch = path.match(/^\/v1\/calls\/([^/]+)\/context$/);
+      if (contextMatch && method === "PATCH") {
+        const id = uuid(contextMatch[1]);
+        const session = await db.one(
+          "realtime_sessions",
+          `conversation_id=eq.${id}&user_id=eq.${user}&expires_at=gt.${nowFilter()}`,
+        );
+        if (!session || session.consent_version !== p.consent_version) {
+          throw new ApiError(
+            409,
+            "call_expired",
+            "Please start a new call after changing privacy choices.",
+          );
+        }
+        await db.patch(
+          "realtime_sessions",
+          `conversation_id=eq.${id}&user_id=eq.${user}`,
+          {
+            context: callContext(
+              await jsonBody(req),
+              p.consents.face_cues === true,
+            ),
+          },
+        );
+        return respond({ updated: true });
+      }
       if (path === "/v1/calls" && method === "POST") {
         const b = await jsonBody(req);
         if (!["voice", "video"].includes(b.mode)) {
@@ -781,6 +898,10 @@ export function createHandler(get: Env = env, fetcher: typeof fetch = fetch) {
           "conversations",
           `id=eq.${uuid(match[1])}&user_id=eq.${user}&ended_at=is.null`,
           { ended_at: new Date().toISOString() },
+        );
+        await db.remove(
+          "realtime_sessions",
+          `conversation_id=eq.${uuid(match[1])}&user_id=eq.${user}`,
         );
         return respond({ ended: true });
       }

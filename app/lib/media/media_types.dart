@@ -23,8 +23,20 @@ class AiraMediaState {
     this.suspended = false,
     this.error,
     this.recordingSeconds = 0,
+    this.realtimeStatus = 'idle',
+    this.callMode = 'listening',
+    this.micMuted = false,
+    this.userCaption,
+    this.agentCaption,
+    this.realtimeError,
+    this.realtimeConnectedAt,
   });
   final String camera, microphone, detection;
+  final String realtimeStatus, callMode;
+  final bool micMuted;
+  final String? userCaption, agentCaption, realtimeError;
+  final DateTime? realtimeConnectedAt;
+  bool get connected => realtimeStatus == 'connected';
   final bool detectionEnabled, playing, suspended;
   final String? emotion, reason, error;
   final int faceCount;
@@ -42,21 +54,33 @@ class AiraMediaState {
       : 'AI-estimated emotion: ${emotion![0].toUpperCase()}${emotion!.substring(1)}';
 
   factory AiraMediaState.fromJson(Map<String, dynamic> json) => AiraMediaState(
-        camera: json['camera'] as String? ?? 'off',
-        microphone: json['microphone'] as String? ?? 'off',
-        detection: json['detection'] as String? ?? 'off',
-        detectionEnabled: json['detectionEnabled'] == true,
-        emotion: json['emotion'] as String?,
-        reason: json['reason'] as String?,
-        error: json['error'] as String?,
-        faceCount: json['faceCount'] as int? ?? 0,
-        observedAt: json['observedAt'] is num
-            ? DateTime.fromMillisecondsSinceEpoch(
-                (json['observedAt'] as num).toInt())
-            : null,
-        inferenceMs: (json['inferenceMs'] as num?)?.toInt(),
-        playing: json['playing'] == true,
-        recordingSeconds: json['recordingSeconds'] as int? ?? 0,
-        suspended: json['suspended'] == true,
-      );
+    realtimeStatus: json['realtimeStatus'] as String? ?? 'idle',
+    callMode: json['callMode'] as String? ?? 'listening',
+    micMuted: json['micMuted'] == true,
+    userCaption: json['userCaption'] as String?,
+    agentCaption: json['agentCaption'] as String?,
+    realtimeError: json['realtimeError'] as String?,
+    realtimeConnectedAt: json['realtimeConnectedAt'] is num
+        ? DateTime.fromMillisecondsSinceEpoch(
+            (json['realtimeConnectedAt'] as num).toInt(),
+          )
+        : null,
+    camera: json['camera'] as String? ?? 'off',
+    microphone: json['microphone'] as String? ?? 'off',
+    detection: json['detection'] as String? ?? 'off',
+    detectionEnabled: json['detectionEnabled'] == true,
+    emotion: json['emotion'] as String?,
+    reason: json['reason'] as String?,
+    error: json['error'] as String?,
+    faceCount: json['faceCount'] as int? ?? 0,
+    observedAt: json['observedAt'] is num
+        ? DateTime.fromMillisecondsSinceEpoch(
+            (json['observedAt'] as num).toInt(),
+          )
+        : null,
+    inferenceMs: (json['inferenceMs'] as num?)?.toInt(),
+    playing: json['playing'] == true,
+    recordingSeconds: json['recordingSeconds'] as int? ?? 0,
+    suspended: json['suspended'] == true,
+  );
 }

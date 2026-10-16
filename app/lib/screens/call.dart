@@ -26,18 +26,19 @@ class CallScreen extends StatefulWidget {
 
 class _CallState extends State<CallScreen> with WidgetsBindingObserver {
   late final AiraMediaController media;
-  final transcript = TextEditingController();
-  final elapsed = Stopwatch();
   Timer? ticker;
   Future<void>? closingSession;
-  bool busy = false, review = false, active = false, starting = false;
-  bool ended = false, paused = false, savingConsent = false;
+  bool active = false, starting = false, previewOpen = false;
+  bool ended = false, paused = false, savingConsent = false, publishing = false;
+  bool captions = true, sessionClosed = true;
   int epoch = 0, consentEpoch = 0;
+  DateTime? connectedAt, lastPublishedAt;
+  String? lastPublishedLabel, correction, contextError;
+  bool correctionShared = false;
   String caption = 'A little chat, at your pace.';
-  String? correction;
-  bool correctionPending = false;
   String get mode => widget.video ? 'video' : 'voice';
-  bool current(int value) => mounted && !ended && active && epoch == value;
+  bool get cameraAllowed => active || previewOpen;
+  bool current(int value) => mounted && !ended && epoch == value;
 
   @override
   void initState() {
@@ -45,8 +46,14 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
     media = widget.mediaController ?? AiraMediaController();
     media.addListener(mediaChanged);
     WidgetsBinding.instance.addObserver(this);
+    // Preload local SDK code only. Microphone capture begins after Start.
+    unawaited(media.prepareRealtime().catchError((_) {}));
     ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && active) setState(() {});
+      if (!mounted || ended) return;
+      if (active) {
+        setState(() {});
+        unawaited(publishContext());
+      }
     });
   }
 
@@ -56,26 +63,38 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
     ++epoch;
     ++consentEpoch;
     ticker?.cancel();
-    elapsed.stop();
     WidgetsBinding.instance.removeObserver(this);
     media.removeListener(mediaChanged);
     media.dispose();
-    transcript.dispose();
     unawaited(closeSession());
     super.dispose();
   }
 
   Future<void> closeSession() async {
-    if (widget.controller.preview) return;
+    if (widget.controller.preview || sessionClosed) return;
+    sessionClosed = true;
     try {
       await widget.controller.endCall();
     } catch (_) {
-      // Media is already stopped; a failed cleanup must never restart capture.
+      // Local devices stop immediately even if server cleanup cannot finish.
     }
   }
 
   void mediaChanged() {
-    if (media.state.suspended && (active || starting)) pauseCall();
+    if (!mounted || ended) return;
+    final state = media.state;
+    if (state.suspended && (active || starting || previewOpen)) {
+      pauseCall('The call stopped while AIRA was in the background.');
+    } else if ((active || starting) &&
+        (state.realtimeStatus == 'failed' ||
+            state.realtimeStatus == 'disconnected')) {
+      pauseCall(
+        state.realtimeError ??
+            'The call ended. Start again when you are ready.',
+      );
+    } else if (active) {
+      unawaited(publishContext());
+    }
   }
 
   @override
@@ -83,75 +102,92 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.hidden ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
-      pauseCall();
+      pauseCall('The call stopped while AIRA was in the background.');
     }
   }
 
-  void pauseCall() {
-    if (!mounted || ended || (!active && !starting)) return;
+  void pauseCall(String message) {
+    if (!mounted || ended || (!active && !starting && !previewOpen)) return;
     ++epoch;
     ++consentEpoch;
-    widget.controller.cancelSend();
     active = false;
     starting = false;
+    previewOpen = false;
+    connectedAt = null;
     media.stopAll();
-    elapsed.stop();
     closingSession = closeSession();
     setState(() {
-      busy = false;
       paused = true;
       savingConsent = false;
-      caption = 'The call is paused. Start again when you are ready.';
+      caption = message;
     });
   }
 
   Future<void> start() async {
     if (active || starting || ended) return;
+    if (widget.controller.preview) {
+      setState(() {
+        previewOpen = true;
+        caption = 'Camera preview only. Live calls need a connected account.';
+      });
+      return;
+    }
     final request = ++epoch;
     setState(() {
       starting = true;
-      caption = 'Getting ready…';
+      caption = 'Connecting your live call…';
+      contextError = null;
     });
     try {
       await closingSession;
-      if (!mounted || ended || epoch != request) return;
-      if (!widget.controller.preview) await widget.controller.beginCall(mode);
-      if (!mounted || ended || epoch != request) {
-        await closeSession();
-        return;
+      if (!current(request)) return;
+      sessionClosed = false;
+      final config = await widget.controller.beginRealtimeCall(mode);
+      // Controller and browser adapter each cancel their own obsolete startup.
+      // Do not let an old continuation close a newer call on this controller.
+      if (!current(request)) return;
+      await media.startRealtime(config);
+      if (!current(request)) return;
+      if (!media.state.connected) {
+        throw StateError('The live connection was not established.');
       }
       setState(() {
         active = true;
         starting = false;
         paused = false;
-        elapsed.reset();
-        elapsed.start();
-        caption = widget.controller.preview
-            ? 'Try your camera and the optional facial expression display.'
-            : 'Tap Speak when you are ready. You can check your words before sending.';
+        connectedAt = media.state.realtimeConnectedAt ?? DateTime.now();
+        lastPublishedAt = null;
+        lastPublishedLabel = null;
+        correctionShared = false;
+        caption = 'Talk naturally. You can interrupt AIRA by speaking.';
       });
+      unawaited(publishContext(force: true));
     } catch (error) {
-      if (!mounted || ended || epoch != request) return;
+      if (!current(request)) return;
+      starting = false;
+      active = false;
+      media.stopAll();
+      closingSession = closeSession();
       setState(() {
-        starting = false;
         caption =
             'The call could not start. Please try again or return to chat.';
       });
-      showMessage(context, AiraController.cleanError(error));
+      if (mounted) showMessage(context, AiraController.cleanError(error));
     }
   }
 
   Future<void> camera() async {
-    if (!active) return;
+    if (!cameraAllowed) return;
     final request = epoch;
     try {
       if (media.state.cameraOn || media.state.cameraBusy) {
         ++consentEpoch;
         setState(() => savingConsent = false);
         media.stopCamera();
+        unawaited(publishContext(force: true));
       } else {
         await media.startCamera();
-        if (!current(request)) media.stopCamera();
+        // The browser camera epoch disposes permission results after End.
       }
     } catch (_) {
       if (mounted && current(request)) {
@@ -165,14 +201,19 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
 
   Future<void> detection(bool enabled) async {
     final request = ++consentEpoch;
-    if (!enabled) media.setDetection(false);
+    if (!enabled) {
+      media.setDetection(false);
+      unawaited(publishContext(force: true));
+    }
     setState(() => savingConsent = true);
     try {
       if (!widget.controller.preview) {
         await widget.controller.updatePreference('face_cues', enabled);
       }
       if (!mounted || ended || request != consentEpoch) return;
-      if (enabled && active && media.state.cameraOn) media.setDetection(true);
+      if (enabled && cameraAllowed && media.state.cameraOn) {
+        media.setDetection(true);
+      }
     } catch (_) {
       if (mounted && !ended && request == consentEpoch) {
         media.setDetection(false);
@@ -180,71 +221,13 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
           context,
           enabled
               ? 'Facial detection remains off because your choice could not be saved.'
-              : 'Detection is off on this device. Please retry saving your privacy choice in Settings.',
+              : 'Detection is off here. Please retry saving your privacy choice in Settings.',
         );
       }
     } finally {
       if (mounted && !ended && request == consentEpoch) {
         setState(() => savingConsent = false);
       }
-    }
-  }
-
-  Future<void> record() async {
-    if (!active || busy) return;
-    if (widget.controller.preview) {
-      showMessage(
-        context,
-        'Voice AI needs service setup. Camera and local emotion detection can be tried now.',
-      );
-      return;
-    }
-    final request = ++epoch;
-    if (!media.state.hasRecording) {
-      try {
-        await media.startRecording();
-        if (!current(request)) media.cancelRecording();
-      } catch (_) {
-        if (mounted && current(request)) {
-          showMessage(
-            context,
-            'Microphone access was not available. Please use chat.',
-          );
-        }
-      }
-      return;
-    }
-    setState(() {
-      busy = true;
-      caption = 'Writing down what you said…';
-    });
-    try {
-      final audio = await media.finishRecording();
-      if (!current(request)) {
-        audio.bytes.fillRange(0, audio.bytes.length, 0);
-        return;
-      }
-      Map<String, dynamic> data;
-      try {
-        data = await widget.controller.api.transcribe(
-          audio.bytes,
-          audio.mimeType,
-        );
-      } finally {
-        audio.bytes.fillRange(0, audio.bytes.length, 0);
-      }
-      if (!current(request)) return;
-      setState(() {
-        transcript.text = data['text']?.toString() ?? '';
-        review = true;
-        caption = 'Check the words below, then send.';
-      });
-    } catch (error) {
-      if (mounted && current(request)) {
-        showMessage(context, AiraController.cleanError(error));
-      }
-    } finally {
-      if (current(request)) setState(() => busy = false);
     }
   }
 
@@ -266,69 +249,59 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
     };
   }
 
-  Future<void> send() async {
-    if (!active || busy || transcript.text.trim().isEmpty) return;
-    final request = ++epoch;
-    final feeling = correctionPending ? correction : null;
-    setState(() {
-      busy = true;
-      caption = 'AIRA is thinking…';
-    });
+  Future<void> publishContext({bool force = false}) async {
+    if (!active || ended || publishing || widget.controller.preview) return;
+    final cue = freshCue();
+    final now = DateTime.now();
+    final cleared = cue == null && lastPublishedLabel != null;
+    if (!force &&
+        !cleared &&
+        lastPublishedAt != null &&
+        now.difference(lastPublishedAt!) < const Duration(seconds: 3)) {
+      return;
+    }
+    if (!force &&
+        cue == null &&
+        lastPublishedLabel == null &&
+        correctionShared) {
+      return;
+    }
+    final request = epoch;
+    final feeling = correction;
+    publishing = true;
     try {
-      final reply = await widget.controller.send(
-        transcript.text,
-        mode: mode,
-        cueSummary: freshCue(),
-        feeling: feeling,
+      await widget.controller.publishCallContext(
+        cueSummary: cue,
+        selfReportedFeeling: feeling,
       );
-      if (!current(request)) return;
+      if (!current(request) || !active) return;
+      lastPublishedAt = now;
+      lastPublishedLabel = cue?['label'] as String?;
       setState(() {
-        caption = reply.text;
-        review = false;
-        correctionPending = false;
+        correctionShared = feeling == correction;
+        contextError = null;
       });
-      if (reply.speechToken != null) {
-        final bytes = await widget.controller.api.speech(reply.speechToken!);
-        if (!current(request)) {
-          bytes.fillRange(0, bytes.length, 0);
-          return;
-        }
-        try {
-          await media.playAudio(bytes);
-        } finally {
-          bytes.fillRange(0, bytes.length, 0);
-        }
-      }
-    } catch (error) {
-      if (mounted && current(request)) {
-        showMessage(context, AiraController.cleanError(error));
+    } catch (_) {
+      if (current(request) && active) {
+        lastPublishedAt = now;
+        setState(
+          () => contextError = 'Your feeling or facial estimate could not reach AIRA yet. You can also say how you feel.',
+        );
       }
     } finally {
-      if (current(request)) setState(() => busy = false);
+      publishing = false;
     }
-  }
-
-  void stopReply() {
-    ++epoch;
-    widget.controller.cancelSend();
-    media.cancelRecording();
-    media.stopPlayback();
-    setState(() {
-      busy = false;
-      caption =
-          'Stopped. Your words are kept here if you would like to try again.';
-    });
   }
 
   void end() {
     if (ended) return;
     ended = true;
     active = false;
+    starting = false;
+    previewOpen = false;
     ++epoch;
     ++consentEpoch;
-    widget.controller.cancelSend();
     media.stopAll();
-    elapsed.stop();
     closingSession = closeSession();
     Navigator.pop(context);
   }
@@ -354,20 +327,18 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
         ],
       ),
     );
-    if (result != null && mounted && !ended) {
-      setState(() {
-        correction = result;
-        correctionPending = true;
-      });
-      showMessage(
-        context,
-        'Your feeling will take priority in your next reply. The facial estimate stays separate.',
-      );
-    }
+    if (result == null || !mounted || ended) return;
+    setState(() {
+      correction = result;
+      correctionShared = false;
+    });
+    unawaited(publishContext(force: true));
   }
 
   String get duration {
-    final seconds = elapsed.elapsed.inSeconds;
+    final seconds = connectedAt == null
+        ? 0
+        : DateTime.now().difference(connectedAt!).inSeconds.clamp(0, 86400);
     return '${(seconds ~/ 60).toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
   }
 
@@ -380,7 +351,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
           ended = true;
           ++epoch;
           media.stopAll();
-          elapsed.stop();
+          unawaited(closeSession());
         }
       },
       child: Scaffold(
@@ -413,7 +384,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                 ),
                               ),
                               Text(
-                                'AI companion · Tap to speak',
+                                'AI companion · Live conversation',
                                 style: TextStyle(
                                   fontSize: 15,
                                   color: AiraColors.muted,
@@ -424,9 +395,8 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                         ),
                         if (active)
                           Text(
-                            '${widget.controller.preview ? 'Preview · ' : ''}$duration',
-                            semanticsLabel:
-                                '${widget.controller.preview ? 'Preview' : 'Active call'} elapsed $duration',
+                            duration,
+                            semanticsLabel: 'Active call elapsed $duration',
                             style: const TextStyle(fontSize: 14),
                           ),
                       ],
@@ -442,8 +412,8 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                             Align(
                               alignment: Alignment.centerRight,
                               child: SizedBox(
-                                width: 170,
-                                height: 124,
+                                width: 300,
+                                height: 225,
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(20),
                                   child: Stack(
@@ -480,7 +450,9 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                               ),
                             ),
                           Companion(
-                            size: MediaQuery.sizeOf(context).width < 500
+                            size: widget.video
+                                ? 175
+                                : MediaQuery.sizeOf(context).width < 500
                                 ? 235
                                 : 290,
                             speaking: media.state.playing,
@@ -495,14 +467,14 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                               borderRadius: BorderRadius.circular(30),
                             ),
                             child: Text(
-                              media.state.isRecording
-                                  ? 'Listening… ${media.state.recordingSeconds} / 45 sec'
-                                  : media.state.hasRecording
-                                  ? 'Recording ready to review'
-                                  : media.state.playing
-                                  ? 'AIRA is speaking'
-                                  : busy
-                                  ? 'AIRA is thinking…'
+                              starting
+                                  ? 'Connecting…'
+                                  : active
+                                  ? media.state.micMuted
+                                        ? 'Microphone muted'
+                                        : media.state.callMode == 'speaking'
+                                        ? 'AIRA is speaking · you can interrupt'
+                                        : 'Listening — speak naturally'
                                   : 'Ready when you are',
                               style: const TextStyle(fontSize: 16),
                             ),
@@ -516,8 +488,27 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                   ?.copyWith(height: 1.4),
                             ),
                           ),
-                          const AiraGap(height: 16),
+                          if (active) ...[
+                            SwitchListTile(
+                              title: const Text('Show captions'),
+                              value: captions,
+                              onChanged: (value) =>
+                                  setState(() => captions = value),
+                            ),
+                            if (captions && media.state.userCaption != null)
+                              AiraCard(
+                                child: Text('You: ${media.state.userCaption}'),
+                              ),
+                            if (captions && media.state.agentCaption != null)
+                              AiraCard(
+                                child: Text(
+                                  'AIRA: ${media.state.agentCaption}',
+                                ),
+                              ),
+                            const AiraGap(height: 12),
+                          ],
                           if (widget.video) ...[
+                            const AiraGap(height: 16),
                             AiraCard(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 16,
@@ -543,7 +534,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                       ),
                                       value: media.state.detectionEnabled,
                                       onChanged:
-                                          active &&
+                                          cameraAllowed &&
                                               media.state.cameraOn &&
                                               !savingConsent
                                           ? detection
@@ -559,8 +550,12 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                         fontWeight: FontWeight.w600,
                                       ),
                                     ),
+                                    const Text(
+                                      'A facial expression is an uncertain estimate, not how you necessarily feel.',
+                                      style: TextStyle(fontSize: 13),
+                                    ),
                                     TextButton(
-                                      onPressed: busy ? null : correct,
+                                      onPressed: correct,
                                       child: const Text(
                                         'That’s not how I feel',
                                       ),
@@ -571,7 +566,11 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                       children: [
                                         Expanded(
                                           child: Text(
-                                            'You said: $correction · ${correctionPending ? 'used for your next reply' : 'shared with AIRA'}',
+                                            'You said: $correction · ${widget.controller.preview
+                                                ? 'local preview'
+                                                : correctionShared
+                                                ? 'shared with AIRA'
+                                                : 'sharing…'}',
                                             style: const TextStyle(
                                               fontSize: 17,
                                               color: AiraColors.forest,
@@ -580,11 +579,15 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                         ),
                                         IconButton(
                                           tooltip: 'Clear my stated feeling',
-                                          onPressed: busy
-                                              ? null
-                                              : () => setState(
-                                                  () => correction = null,
-                                                ),
+                                          onPressed: () {
+                                            setState(() {
+                                              correction = null;
+                                              correctionShared = false;
+                                            });
+                                            unawaited(
+                                              publishContext(force: true),
+                                            );
+                                          },
                                           icon: const Icon(Icons.close),
                                         ),
                                       ],
@@ -592,35 +595,30 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                 ],
                               ),
                             ),
-                            const AiraGap(height: 16),
                           ],
+                          const AiraGap(height: 16),
                           if (media.state.error != null)
                             Notice(media.state.error!),
-                          if (review) ...[
-                            TextField(
-                              controller: transcript,
-                              minLines: 2,
-                              maxLines: 5,
-                              enabled: !busy,
-                              decoration: const InputDecoration(
-                                labelText: 'What I heard — you can edit this',
-                              ),
-                            ),
-                            const AiraGap(height: 12),
-                            FilledButton(
-                              onPressed: active && !busy ? send : null,
-                              child: const Text('Send to AIRA'),
-                            ),
-                            const AiraGap(height: 16),
-                          ],
+                          if (media.state.realtimeError != null)
+                            Notice(media.state.realtimeError!),
+                          if (contextError != null) Notice(contextError!),
                           if (widget.controller.preview)
                             const Notice(
-                              'Voice needs OpenAI and ElevenLabs setup. You can try the real camera and on-device facial model in this preview.',
+                              'Preview mode: camera and facial detection work locally. Sign in to a connected account for live voice calls.',
                             ),
-                          if (!active)
+                          if (!active && !widget.controller.preview)
                             const Notice(
-                              'Starting a call does not switch on your camera or microphone. You choose when to use them.',
+                              'Start opens your microphone. ElevenLabs processes voice; OpenAI creates replies. ElevenLabs recordings are off, and its call history is scheduled for deletion after the call. Camera images stay on your device; camera starts only when you choose.',
                             ),
+                          if (active)
+                            const Text(
+                              'AIRA may take a moment to check a reply before speaking.',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: AiraColors.muted,
+                              ),
+                            ),
+                          const AiraGap(height: 16),
                         ],
                       ),
                     ),
@@ -634,13 +632,22 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                           runSpacing: 10,
                           alignment: WrapAlignment.center,
                           children: [
-                            if (!active)
+                            if (!active && !previewOpen)
                               FilledButton.icon(
-                                onPressed: starting ? null : start,
+                                onPressed:
+                                    starting ||
+                                        (widget.controller.preview &&
+                                            !widget.video)
+                                    ? null
+                                    : start,
                                 icon: const Icon(Icons.call_outlined),
                                 label: Text(
                                   starting
                                       ? 'Connecting…'
+                                      : widget.controller.preview
+                                      ? widget.video
+                                            ? 'Open camera preview'
+                                            : 'Sign in for live calls'
                                       : paused
                                       ? 'Start again'
                                       : widget.video
@@ -650,21 +657,18 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                               ),
                             if (active)
                               FilledButton.icon(
-                                onPressed: busy || media.state.microphoneBusy
-                                    ? null
-                                    : record,
+                                onPressed: () =>
+                                    media.setMicMuted(!media.state.micMuted),
                                 icon: Icon(
-                                  media.state.hasRecording
-                                      ? Icons.stop_rounded
+                                  media.state.micMuted
+                                      ? Icons.mic_off_outlined
                                       : Icons.mic_none_rounded,
                                 ),
                                 label: Text(
-                                  media.state.hasRecording
-                                      ? 'Finish speaking'
-                                      : 'Speak',
+                                  media.state.micMuted ? 'Unmute' : 'Mute',
                                 ),
                               ),
-                            if (active && widget.video)
+                            if (cameraAllowed && widget.video)
                               OutlinedButton.icon(
                                 onPressed: camera,
                                 icon: Icon(
@@ -677,14 +681,6 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
                                       ? 'Camera off'
                                       : 'Camera on',
                                 ),
-                              ),
-                            if (busy ||
-                                media.state.playing ||
-                                media.state.hasRecording)
-                              OutlinedButton.icon(
-                                onPressed: stopReply,
-                                icon: const Icon(Icons.stop),
-                                label: const Text('Stop reply'),
                               ),
                           ],
                         ),

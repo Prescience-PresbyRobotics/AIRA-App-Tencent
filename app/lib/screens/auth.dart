@@ -69,12 +69,12 @@ class _AuthScreenState extends State<AuthScreen> {
           password: password.text,
         );
       } else {
-        await auth.signUp(
+        final result = await auth.signUp(
           email: email.text.trim(),
           password: password.text,
           emailRedirectTo: redirect,
         );
-        note = 'Check your email to verify your account, then come back to sign in.';
+        note = result.session != null ? 'Your account is ready.' : 'Check your email to verify your account, then come back and sign in.';
       }
     } catch (e) {
       note = AiraController.cleanError(e);
@@ -119,7 +119,7 @@ class _AuthScreenState extends State<AuthScreen> {
         AiraGap(height: wide ? 44 : 12),
         Center(
           child: Companion(
-            size: (wide ? 300 : 200) * (widget.controller.largerText ? 1 : .9),
+            size: (wide ? 300 : 200) * (widget.controller.largerText ? .9 : .8),
           ),
         ),
         Text(
@@ -248,14 +248,6 @@ class _AuthScreenState extends State<AuthScreen> {
               onFieldSubmitted: (_) =>
                   act(widget.recovery ? 'recover' : 'email'),
             ),
-            if (login && !widget.recovery)
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: busy ? null : () => act('reset'),
-                  child: const Text('Forgot password?'),
-                ),
-              ),
             if (note.isNotEmpty) ...[const AiraGap(height: 14), Notice(note)],
             const AiraGap(height: 20),
             FilledButton(

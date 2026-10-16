@@ -239,173 +239,244 @@ class PersonalScreen extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext c) {
-    final ctl = controller;
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 1000),
-        child: ListView(
-          padding: AiraLayout.of(c).insets(const EdgeInsets.all(28)),
-          children: [
-            SectionHeading(
-              'A little more about you',
-              subtitle: 'The things you choose to share, remember and plan.',
-            ),
-            AiraCard(
-              color: AiraColors.lavender,
-              child: Row(
-                children: [
-                  const Icon(
-                    Icons.favorite_outline,
-                    size: 34,
-                    color: AiraColors.forest,
-                  ),
-                  const AiraGap(width: 20),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'A moment to check in',
-                          style: TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const AiraGap(height: 6),
-                        Text(
-                          ctl.lonelyDays == null
-                              ? 'How has this week felt for you?'
-                              : 'You reported ${ctl.lonelyDays} lonely days. One answer is a starting point, not a trend.',
-                          style: const TextStyle(
-                            fontSize: 17,
-                            color: AiraColors.muted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const AiraGap(width: 12),
-                  IconButton(
-                    tooltip: 'Weekly check-in',
-                    onPressed: () => checkin(c),
-                    icon: const Icon(Icons.arrow_forward_rounded),
-                  ),
-                ],
+  Widget build(BuildContext c) => Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 960),
+      child: ListView(
+        padding: AiraLayout.of(c).insets(const EdgeInsets.all(28)),
+        children: [
+          const SectionHeading(
+            'A little more about you',
+            subtitle: 'Your memories, plans and everyday moments.',
+          ),
+          AiraCardGrid(
+            children: [
+              AiraSummaryCard(
+                title: 'Memories',
+                icon: Icons.bookmark_border_rounded,
+                color: AiraColors.sage,
+                value: '${controller.memories.length}',
+                subtitle: 'Things you asked AIRA to remember',
+                onTap: () => _open(c, 'Memories'),
               ),
-            ),
-            const AiraGap(height: 18),
-            MoodCheckIn(controller: ctl),
-            const AiraGap(height: 28),
-            _section(
-              c,
-              'Memories',
-              Icons.bookmark_border_rounded,
-              'Little things that make you, you.',
-              () => memory(c),
-            ),
-            if (ctl.memories.isEmpty)
-              _empty(
-                'What would you like AIRA to remember?',
-                'Your interests, favourite things, and stories. Only with your say-so.',
-              )
-            else
-              for (final m in ctl.memories)
-                _item(
-                  c,
-                  m['user_approved_text']?.toString() ??
-                      m['text']?.toString() ??
-                      '',
-                  'Saved with your permission',
-                  Icons.bookmark_border_rounded,
-                  () async {
-                    if (await confirmAction(
-                      c,
-                      'Forget this memory?',
-                      'AIRA will no longer use it. Linked follow-ups will be cancelled.',
-                      confirm: 'Forget',
-                    )) {
-                      try {
-                        await ctl.forgetMemory(m);
-                      } catch (e) {
-                        if (c.mounted) {
-                          showMessage(c, AiraController.cleanError(e));
-                        }
-                      }
-                    }
-                  },
-                ),
-            const AiraGap(height: 28),
-            _section(
-              c,
-              'Plans & follow-ups',
-              Icons.event_outlined,
-              'Something to look forward to.',
-              () => plan(c),
-            ),
-            if (ctl.plans.isEmpty)
-              _empty(
-                'Any plans coming up?',
-                'Choose something you’d like AIRA to ask you about.',
-              )
-            else
-              for (final e in ctl.plans)
-                _item(
-                  c,
-                  e['topic']?.toString() ??
-                      e['label']?.toString() ??
-                      'Your plan',
-                  'Planned · ${_date(e['followup_at'] ?? e['due_at'])}',
-                  Icons.event_outlined,
-                  () async {
-                    try {
-                      await ctl.removePlan(e['id'].toString());
-                    } catch (err) {
-                      if (c.mounted) {
-                        showMessage(c, AiraController.cleanError(err));
-                      }
-                    }
-                  },
-                ),
-            const AiraGap(height: 28),
-            _section(
-              c,
-              'Medicine reminders',
-              Icons.medication_outlined,
-              'Gentle reminders for your confirmed schedule.',
-              () => medicine(c),
-            ),
-            if (ctl.medications.isEmpty)
-              _empty(
-                'No reminders yet',
-                'Add an existing schedule. You stay in control.',
-              )
-            else
-              for (final m in ctl.medications)
-                _item(
-                  c,
-                  m['label']?.toString() ?? 'Medicine reminder',
-                  '${m['instructions'] ?? ''} · ${m['local_time'] ?? _date(m['due_at'])}',
-                  Icons.medication_outlined,
-                  () async {
-                    try {
-                      await ctl.removeMedicine(m['id'].toString());
-                    } catch (e) {
-                      if (c.mounted) {
-                        showMessage(c, AiraController.cleanError(e));
-                      }
-                    }
-                  },
-                ),
-            const AiraGap(height: 24),
-            const Notice(
-              'Prototype reminders are foreground only. Keep AIRA open; background delivery is not active.',
-            ),
-            const AiraGap(height: 28),
-          ],
+              AiraSummaryCard(
+                title: 'Plans & follow-ups',
+                icon: Icons.event_outlined,
+                color: AiraColors.peach,
+                value: '${controller.plans.length}',
+                subtitle: 'Something to look forward to',
+                onTap: () => _open(c, 'Plans & follow-ups'),
+              ),
+              AiraSummaryCard(
+                title: 'Medicine reminders',
+                icon: Icons.medication_outlined,
+                color: AiraColors.lavender,
+                value: '${controller.medications.length}',
+                subtitle: 'Your confirmed schedule',
+                onTap: () => _open(c, 'Medicine reminders'),
+              ),
+              AiraSummaryCard(
+                title: 'My feelings',
+                icon: Icons.mood_rounded,
+                color: AiraColors.sage,
+                value: controller.mood.isEmpty
+                    ? null
+                    : '${controller.mood[0].toUpperCase()}${controller.mood.substring(1)}',
+                subtitle: controller.mood.isEmpty
+                    ? 'How are you feeling today?'
+                    : 'Your own reported feeling',
+                onTap: () => _open(c, 'My feelings'),
+              ),
+              AiraSummaryCard(
+                title: 'Weekly check-in',
+                icon: Icons.favorite_border_rounded,
+                color: AiraColors.peach,
+                value: controller.lonelyDays == null
+                    ? null
+                    : '${controller.lonelyDays} / 7',
+                subtitle: controller.lonelyDays == null
+                    ? 'A moment to reflect'
+                    : 'Lonely days you reported',
+                onTap: () => _open(c, 'Weekly check-in'),
+              ),
+            ],
+          ),
+          const AiraGap(height: 24),
+        ],
+      ),
+    ),
+  );
+
+  void _open(BuildContext c, String section) => Navigator.of(c).push(
+    MaterialPageRoute(
+      builder: (_) => ListenableBuilder(
+        listenable: controller,
+        builder: (context, _) => AiraDetailPage(
+          title: section,
+          children: _details(context, section),
         ),
       ),
-    );
+    ),
+  );
+
+  List<Widget> _details(BuildContext c, String section) {
+    final ctl = controller;
+    return switch (section) {
+      'Memories' => [
+        _section(
+          c,
+          'Memories',
+          Icons.bookmark_border_rounded,
+          'Little things that make you, you.',
+          () => memory(c),
+        ),
+        if (ctl.memories.isEmpty)
+          _empty(
+            'What would you like AIRA to remember?',
+            'Your interests, favourite things, and stories. Only with your say-so.',
+          )
+        else
+          for (final m in ctl.memories)
+            _item(
+              c,
+              m['user_approved_text']?.toString() ??
+                  m['text']?.toString() ??
+                  '',
+              'Saved with your permission',
+              Icons.bookmark_border_rounded,
+              () async {
+                if (await confirmAction(
+                  c,
+                  'Forget this memory?',
+                  'AIRA will no longer use it. Linked follow-ups will be cancelled.',
+                  confirm: 'Forget',
+                )) {
+                  try {
+                    await ctl.forgetMemory(m);
+                  } catch (e) {
+                    if (c.mounted) {
+                      showMessage(c, AiraController.cleanError(e));
+                    }
+                  }
+                }
+              },
+            ),
+      ],
+      'Plans & follow-ups' => [
+        _section(
+          c,
+          'Plans & follow-ups',
+          Icons.event_outlined,
+          'Something to look forward to.',
+          () => plan(c),
+        ),
+        if (ctl.plans.isEmpty)
+          _empty(
+            'Any plans coming up?',
+            'Choose something you’d like AIRA to ask you about.',
+          )
+        else
+          for (final e in ctl.plans)
+            _item(
+              c,
+              e['topic']?.toString() ?? e['label']?.toString() ?? 'Your plan',
+              'Planned · ${_date(e['followup_at'] ?? e['due_at'])}',
+              Icons.event_outlined,
+              () async {
+                try {
+                  await ctl.removePlan(e['id'].toString());
+                } catch (err) {
+                  if (c.mounted) {
+                    showMessage(c, AiraController.cleanError(err));
+                  }
+                }
+              },
+            ),
+        const AiraGap(height: 16),
+        const Notice(
+          'Keep AIRA open for reminders. Background delivery is not active.',
+        ),
+      ],
+      'Medicine reminders' => [
+        _section(
+          c,
+          'Medicine reminders',
+          Icons.medication_outlined,
+          'Gentle reminders for your confirmed schedule.',
+          () => medicine(c),
+        ),
+        if (ctl.medications.isEmpty)
+          _empty(
+            'No reminders yet',
+            'Add an existing schedule. You stay in control.',
+          )
+        else
+          for (final m in ctl.medications)
+            _item(
+              c,
+              m['label']?.toString() ?? 'Medicine reminder',
+              '${m['instructions'] ?? ''} · ${m['local_time'] ?? _date(m['due_at'])}',
+              Icons.medication_outlined,
+              () async {
+                try {
+                  await ctl.removeMedicine(m['id'].toString());
+                } catch (e) {
+                  if (c.mounted) {
+                    showMessage(c, AiraController.cleanError(e));
+                  }
+                }
+              },
+            ),
+
+        const AiraGap(height: 16),
+        const Notice(
+          'Keep AIRA open for reminders. Background delivery is not active.',
+        ),
+      ],
+      'My feelings' => [
+        MoodCheckIn(
+          controller: ctl,
+          onSettings: () {
+            Navigator.pop(c);
+            ctl.setTab(2);
+          },
+        ),
+      ],
+      _ => [
+        AiraCard(
+          color: AiraColors.peach,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(
+                Icons.favorite_border_rounded,
+                size: 36,
+                color: AiraColors.forest,
+              ),
+              const AiraGap(height: 16),
+              Text(
+                'How has this week felt?',
+                style: Theme.of(c).textTheme.titleLarge,
+              ),
+              const AiraGap(height: 12),
+              Text(
+                ctl.lonelyDays == null
+                    ? 'An optional check-in, in your own words.'
+                    : 'You reported ${ctl.lonelyDays} lonely days. One answer is a starting point, not a trend.',
+              ),
+              const AiraGap(height: 20),
+              FilledButton.icon(
+                onPressed: () => checkin(c),
+                icon: const Icon(Icons.edit_outlined),
+                label: Text(
+                  ctl.lonelyDays == null ? 'Start check-in' : 'Review check-in',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    };
   }
 
   String _date(dynamic value) {
@@ -586,8 +657,9 @@ class _LonelinessState extends State<LonelinessDialog> {
 
 /// Self-report is optional and remains separate from facial estimates.
 class MoodCheckIn extends StatefulWidget {
-  const MoodCheckIn({super.key, required this.controller});
+  const MoodCheckIn({super.key, required this.controller, this.onSettings});
   final AiraController controller;
+  final VoidCallback? onSettings;
   @override
   State<MoodCheckIn> createState() => _MoodCheckInState();
 }
@@ -647,8 +719,9 @@ class _MoodCheckInState extends State<MoodCheckIn> {
               ),
               const AiraGap(height: 8),
               TextButton(
-                onPressed: () => widget.controller.setTab(2),
-                child: const Text('Open mood settings'),
+                onPressed:
+                    widget.onSettings ?? () => widget.controller.setTab(2),
+                child: const Text('Open Settings'),
               ),
             ] else ...[
               Wrap(

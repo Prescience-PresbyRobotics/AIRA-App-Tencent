@@ -45,6 +45,14 @@ vm.runInContext(fs.readFileSync(path.join(root, 'emotion_worker.js'), 'utf8'), c
     const result = messages.at(-1);
     assert.equal(result.type, 'result', fixture.name);
     assert.equal(result.faces.length, fixture.expectedFaces, fixture.name);
+    assert.equal(result.frameAspect, fixture.width / fixture.height);
+    for (const face of result.faces) {
+      for (const value of Object.values(face.box)) assert.ok(Number.isFinite(value), 'box coordinates must be finite');
+      assert.ok(face.box.width > 0 && face.box.width <= 1, 'width normalized to input');
+      assert.ok(face.box.height > 0 && face.box.height <= 1, 'height normalized to input');
+      assert.ok(Math.abs(face.box.width * fixture.width - face.width) < .001, 'box and classification share coordinates');
+    }
+    assert.ok(pixels.every(value => value === 0), 'inference clears transferred frame bytes');
     if (fixture.expectedEmotion) {
       const [label] = Object.entries(result.faces[0].expressions).sort((a, b) => b[1] - a[1])[0];
       assert.equal(label, fixture.expectedEmotion, fixture.name);

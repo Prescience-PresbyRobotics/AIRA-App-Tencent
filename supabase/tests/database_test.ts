@@ -7,26 +7,48 @@ const A = "d49f2c15-337f-4133-b9e8-54cf914d6fd3",
 function assert(v: unknown, msg = "Assertion failed") {
   if (!v) throw new Error(msg);
 }
+async function database() {
+  const db = new PGlite();
+  await db.exec(
+    `create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;grant usage on schema public,auth to authenticated,anon,service_role;`,
+  );
+  for (
+    const name of [
+      "202610140001_aira_core.sql",
+      "202610160001_realtime_calls.sql",
+    ]
+  ) {
+    const migration = await Deno.readTextFile(
+      new URL(`../migrations/${name}`, import.meta.url),
+    );
+    await db.exec(migration.replace(
+      "create extension if not exists pgcrypto;",
+      "-- pgcrypto not required by the tested functions; gen_random_uuid is PostgreSQL built-in.",
+    ));
+  }
+
+  return db;
+}
+async function fails(fn: () => Promise<unknown>, message: string) {
+  try {
+    await fn();
+  } catch (e) {
+    assert(
+      String(e).includes(message),
+      `Expected ${message}, received ${String(e)}`,
+    );
+    return;
+  }
+  throw new Error(`Expected ${message}`);
+}
 Deno.test({
   name:
     "Database ownership, privacy, deduplication, reminders and consent-gated test reports",
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const db = new PGlite();
+    const db = await database();
     try {
-      await db.exec(
-        `create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;grant usage on schema public,auth to authenticated,anon,service_role;`,
-      );
-      const migration = await Deno.readTextFile(
-        new URL("../migrations/202610140001_aira_core.sql", import.meta.url),
-      );
-      await db.exec(
-        migration.replace(
-          "create extension if not exists pgcrypto;",
-          "-- pgcrypto not required by the tested functions; gen_random_uuid is PostgreSQL built-in.",
-        ),
-      );
       await db.query("insert into auth.users(id) values($1),($2),($3)", [
         A,
         B,
@@ -236,6 +258,241 @@ Deno.test({
         (await q("select * from schedules where user_id=$1", [A])).length === 0,
         "Deletion cancels scheduled work",
       );
+    } finally {
+      await db.close();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "Live-call reservation enforces ownership, two active slots, mode, privacy version and worker cleanup",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const db = await database();
+    const q = async (sql: string, args: any[] = []) =>
+      (await db.query<any>(sql, args)).rows;
+    const reserve = async (
+      user: string,
+      mode: unknown = "voice",
+      version: unknown = 1,
+    ) =>
+      (await q("select aira_reserve_call($1,$2,$3) result", [
+        user,
+        mode,
+        version,
+      ]))[0].result;
+    try {
+      await q("insert into auth.users(id) values($1),($2),($3)", [A, B, C]);
+      assert(
+        (await q(
+          "select relrowsecurity from pg_class where oid='public.realtime_sessions'::regclass",
+        ))[0].relrowsecurity,
+      );
+      for (const mode of ["text", "invalid", null]) {
+        await fails(() => reserve(A, mode), "invalid_mode");
+      }
+      for (const version of [0, 2, null]) {
+        await fails(() => reserve(A, "voice", version), "state_conflict");
+      }
+      await q("update profiles set enabled=false where id=$1", [C]);
+      await fails(() => reserve(C), "forbidden");
+      await fails(() => reserve(crypto.randomUUID()), "forbidden");
+      assert(
+        (await q("select * from conversations")).length === 0,
+        "Rejected reservations do not create orphan conversations",
+      );
+
+      await db.exec("set role service_role;");
+      const first = await reserve(A);
+      const second = await reserve(A, "video");
+      await fails(() => reserve(A), "rate_limited");
+      await db.exec("reset role;");
+      assert(
+        first.conversation.user_id === A && first.session.user_id === A,
+        "Reservation is bound to its trusted owner",
+      );
+      assert(
+        first.conversation.id === first.session.conversation_id &&
+          first.conversation.initiator === "aira",
+      );
+      assert(
+        first.session.consent_version === 1 &&
+          second.conversation.mode === "video",
+      );
+      assert(
+        Date.parse(first.session.expires_at) -
+            Date.parse(first.conversation.accepted_at) === 15 * 60000,
+        "Database sets exactly 15 minutes, independently of caller input",
+      );
+      assert(
+        (await q("select * from conversations where user_id=$1", [A]))
+          .length === 2,
+        "A full cap does not create an orphan",
+      );
+
+      for (const viewer of [A, B]) {
+        await db.exec(
+          `set role authenticated;select set_config('request.jwt.claim.sub','${viewer}',false);`,
+        );
+        await fails(
+          () => q("select * from realtime_sessions"),
+          "permission denied",
+        );
+        await fails(() => reserve(A), "permission denied");
+        await fails(() => q("select aira_worker_tick()"), "permission denied");
+        await fails(
+          () => q("select aira_worker_tick_core()"),
+          "permission denied",
+        );
+        await db.exec("reset role;");
+      }
+      // PGlite serializes its one connection; this verifies admission outcomes.
+      // The row FOR UPDATE in the RPC provides cross-connection serialization in Postgres.
+      const attempts = await Promise.allSettled([
+        reserve(B),
+        reserve(B),
+        reserve(B),
+      ]);
+      assert(
+        attempts.filter((r) => r.status === "fulfilled").length === 2,
+        "Only two queued starts acquire slots",
+      );
+      assert(
+        attempts.filter((r) =>
+          r.status === "rejected" && String(r.reason).includes("rate_limited")
+        ).length === 1,
+      );
+
+      await q(
+        "update realtime_sessions set expires_at=now()-interval '1 second',context='{\"selfReportedFeeling\":\"sad\"}' where conversation_id=$1",
+        [first.conversation.id],
+      );
+      const replacement = await reserve(A);
+      await q("update conversations set ended_at=now() where id=$1", [
+        second.conversation.id,
+      ]);
+      await reserve(A);
+      const tick = (await q("select aira_worker_tick() result"))[0].result;
+      assert(
+        tick.events === 0 && tick.testReports === 0 &&
+          tick.externalDelivery === false,
+        "Worker retains its existing result contract",
+      );
+      assert(
+        (await q(
+          "select * from realtime_sessions where conversation_id=any($1)",
+          [[first.conversation.id, second.conversation.id]],
+        )).length === 0,
+        "One worker tick physically deletes expired and ended session context",
+      );
+      assert(
+        (await q("select ended_at from conversations where id=$1", [
+          first.conversation.id,
+        ]))[0].ended_at !== null,
+        "Expired live conversations are ended",
+      );
+      assert(
+        (await q("select * from realtime_sessions where conversation_id=$1", [
+          replacement.conversation.id,
+        ])).length === 1,
+        "Valid active call survives cleanup",
+      );
+
+      await q(
+        'select aira_preferences($1,\'{"consents":{"face_cues":false}}\')',
+        [A],
+      );
+      await fails(() => reserve(A, "voice", 1), "state_conflict");
+      const current = await reserve(A, "voice", 2);
+      await q("select aira_worker_tick()");
+      const remaining = await q(
+        "select * from realtime_sessions where user_id=$1",
+        [A],
+      );
+      assert(
+        remaining.length === 1 &&
+          remaining[0].conversation_id === current.conversation.id,
+        "Revoked contexts are deleted while the current privacy version survives",
+      );
+      await q("update profiles set enabled=false where id=$1", [B]);
+      await db.exec("set role service_role;");
+      await q("select aira_worker_tick()");
+      await fails(
+        () => q("select aira_worker_tick_core()"),
+        "permission denied",
+      );
+      await db.exec("reset role;");
+      assert(
+        (await q("select * from realtime_sessions where user_id=$1", [B]))
+          .length === 0,
+        "The service-role worker removes disabled accounts' ephemeral context",
+      );
+      await q("select aira_purge($1)", [A]);
+      assert(
+        (await q("select * from realtime_sessions where user_id=$1", [A]))
+          .length === 0,
+        "User purge cascades into live sessions",
+      );
+    } finally {
+      await db.close();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "Live message allowance requires an owned, unexpired session and stays bounded",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const db = await database();
+    const q = async (sql: string, args: any[] = []) =>
+      (await db.query<any>(sql, args)).rows;
+    try {
+      await q("insert into auth.users(id) values($1),($2)", [A, B]);
+      const call =
+        (await q("select aira_reserve_call($1,'voice',1) result", [A]))[0]
+          .result;
+      const id = call.conversation.id;
+      await q(
+        "insert into message_requests(user_id,client_id,conversation_id,created_at) select $1,gen_random_uuid(),$2,now()-interval '2 minutes' from generate_series(1,20)",
+        [A, id],
+      );
+      const message = (user: string) =>
+        q("select aira_reserve_message($1,$2,$3,'voice') result", [
+          user,
+          crypto.randomUUID(),
+          id,
+        ]);
+      await db.exec(
+        `set role authenticated;select set_config('request.jwt.claim.sub','${A}',false);`,
+      );
+      await fails(() => message(A), "permission denied");
+      await db.exec("reset role;");
+      await fails(() => message(B), "conversation_not_found");
+      const success = (await message(A))[0].result;
+      assert(
+        success.request.conversation_id === id,
+        "Valid live call can exceed text allowance",
+      );
+      await q(
+        "update realtime_sessions set expires_at=now()-interval '1 second' where conversation_id=$1",
+        [id],
+      );
+      await fails(() => message(A), "rate_limited");
+      await q("delete from realtime_sessions where conversation_id=$1", [id]);
+      await fails(() => message(A), "rate_limited");
+      await q(
+        "insert into realtime_sessions(conversation_id,user_id,consent_version) values($1,$2,1)",
+        [id, A],
+      );
+      await q(
+        "insert into message_requests(user_id,client_id,conversation_id,created_at) select $1,gen_random_uuid(),$2,now()-interval '2 minutes' from generate_series(1,99)",
+        [A, id],
+      );
+      await fails(() => message(A), "rate_limited");
     } finally {
       await db.close();
     }

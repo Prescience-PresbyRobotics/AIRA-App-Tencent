@@ -2,19 +2,20 @@
 
 A warm, English-first AI companion built with **Flutter, Supabase and Firebase Hosting**.
 
-This is a functional prototype with a [hosted app](https://aira-app-tencent.web.app), a local interface preview and a deployed Supabase backend. **Hosted password authentication and live OpenAI/ElevenLabs APIs passed a synthetic smoke test. Google login and public registration email delivery still need setup.** Browser/device flows remain to be tested; the app is not yet ready for production use.
+This is a functional prototype with a [hosted app](https://aira-app-tencent.web.app), a local interface preview and a deployed Supabase backend. **Live Auth, screened OpenAI, ElevenLabs STT/TTS and a provider WebSocket conversation passed synthetic tests on 16 October. WebRTC token issuance also passed; browser microphone/WebRTC and physical-device calls are still unverified. Google login still needs setup. Email verification stays enabled; the user reports it is working.** This is a tested prototype, not a production-ready service.
 
 Canonical repository: [Prescience-PresbyRobotics/AIRA-App-Tencent](https://github.com/Prescience-PresbyRobotics/AIRA-App-Tencent). `aira-mobile-app` is a separate project; do not use its repository or cloud resources.
 
-## Setup status — 15 October 2026
+## Setup status — 16 October 2026
 
 - Supabase project: `yzcnccjlwgrkxokgjtkv`, URL `https://yzcnccjlwgrkxokgjtkv.supabase.co`, already linked to the canonical repository.
-- Migration `202610140001` applied; all 16 app tables have RLS enabled. `aira-api` and `aira-worker` deployed with server-side authorization.
-- Firebase project: **AIRA-App-Tencent**, ID `aira-app-tencent`, hosted at [aira-app-tencent.web.app](https://aira-app-tencent.web.app). HTTPS, static assets and SPA fallback were verified; deployed JavaScript matches the connected local build.
-- Email confirmation remains enabled; new passwords require 10 characters. Auth Site URL is `https://aira-app-tencent.web.app`; redirects allow localhost port 8080 and this project's `web.app`/`firebaseapp.com` domains. Custom SMTP and Google OAuth remain unconfigured; the Google Cloud console failed to load during OAuth setup.
+- Core migration `202610140001` and realtime migration `202610160001` support the deployed API, realtime gate and worker. The core tables and new realtime-session table use RLS with server-side authorization.
+- Firebase project: **AIRA-App-Tencent**, ID `aira-app-tencent`, hosted at [aira-app-tencent.web.app](https://aira-app-tencent.web.app). HTTPS, static assets and SPA fallback were verified on the hosted build. The final 16 October frontend is built and deployed; verification details appear below.
+- Email confirmation stays enabled by the user’s 16 October instruction: verification is working according to the user. Only the **Forgot password** entry is hidden. This is user-reported delivery success, not an independent SMTP/email-delivery test. New passwords require 10 characters. Auth Site URL is `https://aira-app-tencent.web.app`; redirects allow localhost port 8080 and this project's `web.app`/`firebaseapp.com` domains. Google OAuth remains unconfigured; the Google Cloud console failed to load during setup. A custom SMTP sender has not been configured by this work; that does not negate the user’s successful verification report.
 - Private worker/signing secrets, exact local/Firebase CORS origins and one minute-based Cron job are configured. Authenticated worker execution returned HTTP 200; unauthenticated API/worker calls returned 401. No external caregiver delivery occurs.
 - Provider keys are stored in Supabase Edge secrets. `OPENAI_MODEL=gpt-4.1-mini`; ElevenLabs voice ID is `La9lzDJ3mmfNhhQA06WM`, with `scribe_v2` transcription and `eleven_multilingual_v2` speech synthesis.
-- A live synthetic test passed password authentication through the hosted Auth API, profile/consent checks, denied staff access, screened OpenAI text, ElevenLabs synthesis and transcription. Its preconfirmed temporary Auth account and app profile were removed and their absence verified.
+- The 16 October source adds an authenticated ElevenLabs realtime agent session, the `aira-realtime` custom-LLM gate and a locally bundled `@elevenlabs/client` 1.28.0 bridge. Saved private-agent configuration was verified to require authentication, use the screened custom LLM with no fallback, disable voice recording and set `retention_days:0`. The 15-minute cap and scheduled deletion policy still need operational/device checks; zero-day retention is not proof of instant deletion or zero logging. The provider rejected special zero-retention mode with the custom LLM; the original cloned voice is also incompatible with this agent. A private agent is now provisioned with Jessica (`cgSgspJ2msm6clMCkdW9`) as the user-confirmed voice, and the realtime backend is deployed. A live provider WebSocket test passed; browser microphone/WebRTC device testing remains pending. The temporary provisioning function was removed after testing.
+- A live synthetic test on 15 October passed password authentication through the hosted Auth API, profile/consent checks, denied staff access, screened OpenAI text, ElevenLabs synthesis and transcription. Its preconfirmed temporary Auth account and app profile were removed and their absence verified.
 - This machine has ignored `config/app.local.json` for a connected web build. Team members must configure their own local file; no private provider or worker secret belongs in the web app.
 
 ## Try the interface
@@ -26,9 +27,9 @@ python3 scripts/check_app.py --build
 python3 -m http.server 8080 --bind 127.0.0.1 --directory app/build/web
 ```
 
-Open **http://localhost:8080** and choose **Explore the interface**. No account or API key is needed. Enter a preferred name, choose optional permissions, and try Chat, About me, Settings, caregiver/admin examples and the call screen.
+Open **http://localhost:8080** and choose **Explore the interface**. No account or API key is needed. Choose optional permissions, then try Chat, About me, Settings, caregiver/admin examples and the call screen. Aira asks your name in the first conversation; onboarding does not ask it again.
 
-Preview data stays in memory and disappears on exit/reload. Dashboard history is explicitly synthetic. Chat never fabricates a live AI reply when services are missing. On video, Start call → Camera → optional facial analysis uses the actual bundled model; it needs camera permission and a compatible browser. Recording in preview does not upload to a speech provider.
+Preview data stays in memory and disappears on exit/reload. Dashboard history is explicitly synthetic. Chat never fabricates a live AI reply when services are missing. The preview does not connect a real voice provider. Local camera preview and separately enabled facial analysis use the bundled model and require camera permission and a compatible browser. They do not establish that a live call works.
 
 For iterative development:
 
@@ -44,11 +45,11 @@ The build/check script runs checks in a temporary copy to avoid a Flutter test-l
 
 | Area | Current behavior |
 | --- | --- |
-| Design | Responsive cream/forest/coral Flutter UI, original animated vector companion, compact default, optional Larger text, mobile navigation and desktop sidebar. Larger text preserves the original font size and roomy spacing; signed-in preferences persist and device text scaling remains supported. |
-| Accounts | Supabase email registration, verification, login, recovery and Google OAuth UI. Hosted password authentication is verified through the API; public email delivery and Google OAuth setup remain incomplete. |
-| Text | Authenticated OpenAI Responses integration with short-term context, approved memories and buffered reply screening. No API secret in the browser. |
-| Voice | ElevenLabs transcription → editable transcript → screened OpenAI reply → ElevenLabs speech. Tap-to-speak, 45-second/5 MB recording limit. |
-| Video | Character call plus local camera, separately consented open-source face-api.js expression inference and visible estimates/unknown states. Corrections take priority in conversation. |
+| Design | Responsive cream/forest/coral Flutter UI, original animated vector companion, compact default, optional Larger text, mobile navigation and desktop sidebar. Compact uses 0.78× base text; Larger uses the previous default 0.9×. Device text scaling still applies, with minimum touch targets preserved; accessibility testing remains a release gate. Signed-in preferences persist. |
+| Accounts | Supabase email registration/login UI and Google OAuth entry. Hosted password authentication is verified through the API. The user reports email verification works and confirmed it should stay enabled; signup directs users to check their email. Only Forgot password is hidden. Google OAuth setup remains incomplete. |
+| Text | Aira opens with a name question, then follows a warm, one-question-at-a-time prompt. Actual message timestamps, server-acknowledged Delivered, Read after an AI reply, pending-only typing and retry states. OpenAI Responses uses permitted context/memory and buffered screening. |
+| Voice | ElevenLabs realtime audio uses the screened OpenAI custom-LLM gate. A provider WebSocket greeting/reply/audio exchange and interruption event passed; WebRTC token issuance passed. Replies are buffered until approved. Browser microphone/WebRTC, reconnect and device behavior remain unverified. Older bounded STT/TTS endpoints remain available. |
+| Video | Realtime audio plus the animated Aira mascot and optional local camera; pinned face-api.js 0.22.2 provides separately consented expression estimates/unknown states. Explicit feelings take priority. No human or generated remote video feed. |
 | Personal information | Explicitly saved/forgotten memories, one-time plan follow-ups, confirmed medication reminders and optional dated weekly check-ins. |
 | Reminders | Scheduled database worker, foreground polling, accept/decline and Taken/Skip/Snooze. No background delivery. |
 | Care | Protected caregiver/admin screens, shared metrics, review decisions and report acknowledgement. Urgent qualifying flags route automatically to an **internal test inbox** with consent/link checks; nonurgent reports require review. |
@@ -61,9 +62,9 @@ Facial estimates are uncertain expression labels, not a diagnosis or a reliable 
 
 The confirmed test environment above is connected. For team access or another environment:
 
-1. **Supabase:** use the confirmed project above. Configure an SMTP sender and Google OAuth. The schema, Edge Functions and scheduled worker are already deployed there; use [the backend setup guide](supabase/README.md) when provisioning another environment.
+1. **Supabase:** use the confirmed project above. Google OAuth remains to configure. Keep email confirmation enabled as the user requested. The user reports verification works; this work has not independently tested its email delivery. Only Forgot password is hidden; signup keeps the check-your-email step. The schema, Edge Functions and scheduled worker are already deployed there; use [the backend setup guide](supabase/README.md) when provisioning another environment.
 2. **OpenAI:** the confirmed project's key and `gpt-4.1-mini` model are configured. For a new environment, add a key and explicit `OPENAI_MODEL` to Supabase Edge Function secrets. A ChatGPT subscription is separate from API access.
-3. **ElevenLabs:** the confirmed project uses voice `La9lzDJ3mmfNhhQA06WM`. For another environment, configure a permitted voice ID and API key using the names in `supabase/.env.example`.
+3. **ElevenLabs:** the confirmed project uses voice `La9lzDJ3mmfNhhQA06WM`. Realtime calls additionally need an authenticated agent, `ELEVENLABS_AGENT_ID`, `AIRA_CALL_SIGNING_SECRET` and `AIRA_REALTIME_BRIDGE_SECRET` on the server. Follow the [backend setup guide](supabase/README.md); verify saved provider privacy settings before real use.
 4. **Firebase:** use project `aira-app-tencent`, selected in `.firebaserc`. Do not select `aira-mobile-app`. Firebase hosts the Flutter web files; Supabase remains the authentication/database/backend service.
 5. **Public app configuration:** copy `config/app.example.json` to `config/app.local.json`, then fill in the Supabase URL and publishable/anon key. Those values are designed for the client. Keep service-role, OpenAI, ElevenLabs, worker and signing secrets out of this file.
 6. **Redirects and origins:** allow the exact local and Firebase origins in Supabase Auth and `AIRA_ALLOWED_ORIGINS`. Google uses the Supabase Auth callback, not the Flutter URL. Test verification/recovery and new/returning Google accounts on the final domain. [Official Google setup](https://supabase.com/docs/guides/auth/social-login/auth-google).
@@ -113,15 +114,19 @@ The current target is mobile browsers and desktop web. Android/iOS packages, app
 python3 scripts/check_app.py --build
 node app/web/media/test/media_lifecycle_test.cjs
 node app/web/media/test/model_smoke_test.cjs
-deno check supabase/functions/aira-api/index.ts supabase/functions/aira-worker/index.ts
+deno check supabase/functions/aira-api/index.ts supabase/functions/aira-realtime/index.ts supabase/functions/aira-worker/index.ts
 deno test -A supabase/tests/
 ```
 
 Tests cover preview/auth layouts, consent and cleanup, late replies, account isolation, retry IDs, weekly missing-versus-zero responses, call/media lifecycle, protected dashboard data, API authorization, real PostgreSQL migration/RLS behavior and output gating. Automated model checks execute the bundled model; they are not accuracy or clinical validation.
 
-The 15 October check passed Flutter analysis, all 30 Flutter tests, all 17 backend tests and a connected web build. Media lifecycle/model smoke tests passed in the earlier implementation check; media code was unchanged. Hosted RLS, authorization rejection, configured CORS, worker execution and Firebase assets were verified. Install Node.js for the media checks and Deno 2 for the backend checks. The Deno database test downloads the source-pinned PGlite package on first use.
+On 16 October, **43 Flutter tests and 30 Deno tests passed**. Browser checks verified the greeting and updated cards. The final frontend, including signup verification wording and media cache updates, was successfully built and deployed to Firebase Hosting. Hosted RLS, authorization rejection, CORS and worker execution were checked separately. Install Node.js for media checks and Deno 2 for backend checks; the database test downloads source-pinned PGlite on first use.
 
-To repeat the successful live integration smoke test, sign in to the Supabase CLI with project admin access and run:
+Live synthetic checks on 16 October passed Auth/API access, screened OpenAI (6.62 s), original-voice TTS (4.39 s), STT (2.01 s), WebRTC token issuance (1.90 s) and a direct screened call-bridge reply (5.78 s). An actual ElevenLabs **WebSocket** connection received the greeting, a matching reply with 159,760 audio bytes and an interruption event; the whole connection took 10.9 s. End invalidated the call token, and synthetic-account cleanup was verified. These are single-run observations, not latency guarantees or a browser microphone/WebRTC end-to-end test.
+
+The realtime check was an ad hoc verification, not a committed `smoke_realtime.py` script. The existing command below repeats the bounded Auth/OpenAI/STT/TTS baseline only.
+
+To repeat the existing bounded integration smoke test, sign in to the Supabase CLI with project admin access and run:
 
 ```sh
 python3 scripts/smoke_live.py --project-ref yzcnccjlwgrkxokgjtkv \
@@ -132,10 +137,10 @@ Omit `--run` to inspect the plan without accessing the network. A live run incur
 
 ## Work still needed
 
-- Custom SMTP and email registration/confirmation/recovery tests; Google OAuth setup and new/returning account tests. Retry the Google Cloud console to finish OAuth configuration.
-- Browser end-to-end chat/call testing on the hosted app; the successful provider smoke used synthetic audio through the backend API.
+- Finish Google OAuth setup and account-flow tests. Keep email verification enabled as requested; the user reports it works, while independent email-delivery testing remains to do. Only the Forgot password entry is hidden by choice.
+- Browser microphone/WebRTC end-to-end calls on the hosted app; the provider WebSocket test and token issuance do not verify browser audio capture, echo or playback.
 - Physical camera/microphone testing on iPhone Safari and Android Chrome, assistive technology and senior usability checks.
-- Continuous voice conversation/interruption, recurring routines, background invitations and reliable medication alarms.
+- Verify device interruption/reconnect, the 15-minute limit, actual provider deletion behavior and pre-speech latency under realistic load; saved settings alone do not prove deletion timing. Recurring routines, background invitations and reliable medication alarms remain unimplemented.
 - Self-service verified caregiver linking and staff provisioning. Prototype access is configured by a trusted administrator.
 - Connected call-duration and genuine multiweek/cohort metrics; the controlled 24-hour retention cannot establish long-term impact. Synthetic dashboard history is not evidence of benefit.
 - Agreed pilot retention, provider controls, evaluated urgency rules, staffed review and actual caregiver delivery. No real caregiver has been contacted.

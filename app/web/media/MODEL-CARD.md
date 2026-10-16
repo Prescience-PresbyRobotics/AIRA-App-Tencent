@@ -1,6 +1,6 @@
 # AIRA local facial-expression model
 
-Selected and integrated on 14 October 2026. This is an engineering prototype,
+Selected and integrated on 14 October 2026; live box overlay added 16 October 2026. This is an engineering prototype,
 not a validated measure of a senior's feelings or wellbeing.
 
 ## Source and distribution
@@ -32,7 +32,10 @@ Tiny Face Detector, face alignment and the real FaceExpressionNet classifier.
 No identity/recognition, age, gender or face descriptor model is loaded or run.
 
 Sampling is at most two frames/second; it automatically slows to avoid overlapping
-CPU work. Model loading and inference time out explicitly. One usable face is
+CPU work. The worker returns a normalized single-face box. The local preview applies
+the same aspect-fill crop and front-camera mirror to that box as to the video.
+The box and live label clear on no face, multiple faces, stale input or revocation.
+Model loading and inference time out explicitly. One usable face is
 required (detection score ≥0.65 and crop at least 48×48 at processing resolution).
 The last three seconds of scores are averaged, with at least two samples. A
 winning score ≥0.55 and a ≥0.15 gap are engineering abstention thresholds, **not
@@ -53,8 +56,8 @@ restart an ended call. No camera frame is sent to Supabase, OpenAI or ElevenLabs
 The media module itself neither persists nor sends even the emotion label to a
 server. In connected mode the call screen separately saves `face_cues` consent
 before enabling analysis, explains that a fresh estimate can help AIRA reply,
-and may attach only the label and observation time to the next protected text
-request. It requires one face and an estimate under five seconds old. Raw scores,
+and sends only the label and observation time to the active protected call
+context, at most once every three seconds (plus immediate clearing). It requires one face and an estimate under five seconds old. Raw scores,
 frames, crops and landmarks are not included. A senior's correction is submitted
 as separate explicit self-report for the next reply, never substituted for the
 facial model result or automatically stored as a mood measurement.
@@ -75,10 +78,11 @@ The automated lifecycle test verifies consent separation, no media on load,
 cancellation while permission is pending, track release, background suspension,
 unknown/multiple/stale results, late inference after revocation, and bounded audio
 recording cleanup. Its controlled classifier messages are test fixtures only.
-Eight Flutter widget tests additionally verify explicit call acceptance before
-timing/capture, Finish speaking after the hard limit, late transcription/model/
-audio results after Stop/End/background, saving analysis consent before enabling,
-and separate self-report versus facial-cue submission.
+Seven Flutter widget tests verify explicit live-call acceptance before capture,
+timing only after actual connection, late session token/connection after End,
+mute, live captions, background stop, saving consent before analysis, and separate
+self-report versus facial-cue submission with no-face clearing. The JavaScript
+checks verify the mirrored/cropped box projection and late SDK microphone cleanup.
 
 The separate real-model smoke test verifies the packaged asset hashes and executes
 the actual worker/runtime/weights against a blank image. A temporary test run also
@@ -100,21 +104,18 @@ Add `web: ^1.1.1` to Flutter dependencies and load
 `<script src="media/aira_media.js"></script>` before Flutter bootstrap.
 Import `lib/media/aira_media.dart`; use `AiraMediaController` and
 `AiraCameraPreview`. The preview itself never starts a camera. Start camera and
-recording only on explicit user actions, and dispose the controller on call exit.
+live calls only on explicit user actions, and dispose the controller on call exit.
 
-Recording stops at 45 seconds or 5,000,000 bytes; the UI displays elapsed seconds.
-The automatic time cutoff stops the microphone but retains the clip for the
-senior to select Finish speaking. End/Stop/background discard it.
-`finishRecording()` returns bounded bytes plus the actual browser MIME type for
-the protected ElevenLabs transcription endpoint. The initial voice path is tap
-to speak, not continuous calling. The senior must review the transcript before
-it enters the same screened text path. Pass only server-approved audio bytes to
-`playAudio`; this local media module does not generate or approve speech.
+The call screen now uses the official ElevenLabs WebRTC SDK through
+`prepareRealtime`, `startRealtime` and `setMicMuted`. See `REALTIME-CALLS.md`.
+The older bounded recording/read-aloud utilities remain for other app surfaces,
+but the live call screen no longer records a clip or waits for a Send action.
 `stopAll()` must accompany cancellation of pending backend requests in the screen.
 
 Run with a Node runtime:
 
 ```sh
 node app/web/media/test/media_lifecycle_test.cjs
+node app/web/media/test/realtime_lifecycle_test.cjs
 node app/web/media/test/model_smoke_test.cjs
 ```

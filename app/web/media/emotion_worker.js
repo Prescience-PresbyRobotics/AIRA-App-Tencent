@@ -44,13 +44,16 @@ self.onmessage = async ({data}) => {
     const results = await faceapi.detectAllFaces(tensor,
       new faceapi.TinyFaceDetectorOptions({inputSize: 224, scoreThreshold: 0.5}))
       .withFaceLandmarks(true).withFaceExpressions();
-    // Only scores/quality leave this worker. No frames, landmarks or face
+    // Only scores, a normalized box and quality leave this worker. No frames, landmarks or face
     // descriptors are retained, sent to the app backend, or written to storage.
     self.postMessage({type: 'result', id: data.id, sampledAt: data.sampledAt,
+      frameAspect: data.width / data.height,
       faces: results.map(result => ({
         score: result.detection.score,
         width: result.detection.box.width,
         height: result.detection.box.height,
+        box: {x: result.detection.box.x / data.width, y: result.detection.box.y / data.height,
+          width: result.detection.box.width / data.width, height: result.detection.box.height / data.height},
         expressions: {...result.expressions},
       })), elapsedMs: Math.round(performance.now() - started)});
   } catch (error) {

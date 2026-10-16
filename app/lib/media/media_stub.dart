@@ -1,5 +1,7 @@
 import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+
 import 'media_types.dart';
 
 /// Native audio/camera adapters remain a separate, explicitly unimplemented milestone.
@@ -9,6 +11,11 @@ class AiraMediaController extends ChangeNotifier {
     reason: 'Model unavailable on this platform',
     error: 'Voice and camera are currently available in the browser version.',
   );
+  Future<void> prepareRealtime() async {}
+  Future<void> startRealtime(Map<String, dynamic> config) => Future.error(
+    UnsupportedError('Live calls are available in the browser version.'),
+  );
+  void setMicMuted(bool muted) {}
   Future<void> startCamera() async => notifyListeners();
   void stopCamera() {}
   void setDetection(bool enabled) => notifyListeners();
@@ -16,9 +23,10 @@ class AiraMediaController extends ChangeNotifier {
   Future<RecordedAudio> finishRecording() =>
       Future.error(UnsupportedError('Use the browser version for voice.'));
   void cancelRecording() {}
-  Future<void> playAudio(Uint8List bytes,
-          [String mimeType = 'audio/mpeg']) async =>
-      notifyListeners();
+  Future<void> playAudio(
+    Uint8List bytes, [
+    String mimeType = 'audio/mpeg',
+  ]) async => notifyListeners();
   void stopPlayback() {}
   void stopAll() {}
 }
@@ -28,5 +36,6 @@ class AiraCameraPreview extends StatelessWidget {
   final AiraMediaController controller;
   @override
   Widget build(BuildContext context) => const Center(
-      child: Text('Camera preview is available in the browser version.'));
+    child: Text('Camera preview is available in the browser version.'),
+  );
 }

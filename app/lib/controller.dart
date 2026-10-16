@@ -15,18 +15,27 @@ String requestUuid() {
   return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
 }
 
+enum MessageDelivery { sending, delivered, read, unconfirmed, cancelled }
+
+const airaIntroduction =
+    'Hi my name is Aira, nice to meet you! How would you like me to call you?';
+
 class ChatTurn {
   final String id, text;
   final bool fromAira;
   final String? speechToken;
   final DateTime time;
+  MessageDelivery delivery;
+  String? issue;
   ChatTurn({
     required this.text,
     required this.fromAira,
     String? id,
     this.speechToken,
-  }) : id = id ?? DateTime.now().microsecondsSinceEpoch.toString(),
-       time = DateTime.now();
+    DateTime? time,
+    this.delivery = MessageDelivery.read,
+  }) : id = id ?? requestUuid(),
+       time = time ?? DateTime.now();
 }
 
 class AiraController extends ChangeNotifier {
@@ -61,7 +70,20 @@ class AiraController extends ChangeNotifier {
   int get sessionEpoch => _sessionEpoch;
   bool _disposed = false;
   bool _current(int epoch) => !_disposed && epoch == _sessionEpoch;
+  Timer? _deliveryPoll;
   void cancelSend() {
+    _deliveryPoll?.cancel();
+    _deliveryPoll = null;
+    for (final turn in outbox) {
+      if (turn.delivery == MessageDelivery.delivered &&
+          sending &&
+          turn.id == pendingRequest) {
+        turn.issue = 'Reply stopped. Your message was delivered.';
+      } else if (turn.delivery == MessageDelivery.sending) {
+        turn.delivery = MessageDelivery.cancelled;
+        turn.issue = 'Stopped waiting. Delivery is not confirmed.';
+      }
+    }
     revision++;
     sending = false;
     notifyListeners();
@@ -87,6 +109,18 @@ class AiraController extends ChangeNotifier {
   Map<String, dynamic> capabilities = {};
   List<Map<String, dynamic>> memories = [], plans = [], medications = [];
   List<ChatTurn> messages = [];
+  final List<ChatTurn> outbox = [];
+  ChatTurn? _introduction;
+  String? suggestedName;
+  bool savingName = false;
+  ChatTurn get introduction => _introduction ??= ChatTurn(
+    text: name.trim().isEmpty
+        ? airaIntroduction
+        : 'Hi $name, it’s nice to hear from you. What would you like to chat about?',
+    fromAira: true,
+  );
+  List<ChatTurn> get visibleMessages =>
+      [...messages, ...outbox]..sort((a, b) => a.time.compareTo(b.time));
   bool get configured => client != null;
   bool get signedIn =>
       preview || (!_signingOut && client?.auth.currentSession != null);
@@ -94,6 +128,12 @@ class AiraController extends ChangeNotifier {
   AiraApi get api => AiraApi(client!);
   bool consent(String key) => preferences[key] == true;
   void _clear() {
+    _deliveryPoll?.cancel();
+    _deliveryPoll = null;
+    outbox.clear();
+    _introduction = null;
+    suggestedName = null;
+    savingName = false;
     _sessionEpoch++;
     revision++;
     sending = false;
@@ -203,7 +243,8 @@ class AiraController extends ChangeNotifier {
     final proposedName = value.trim();
     if (!preview) {
       final result = await api.request('PATCH', '/preferences', {
-        'display_name': proposedName,
+        if (proposedName.isNotEmpty && choices['memory_enabled'] == true)
+          'display_name': proposedName,
         'locale': 'en',
         'timezone': 'Asia/Singapore',
         'onboarded': true,
@@ -214,7 +255,7 @@ class AiraController extends ChangeNotifier {
       privacyVersion =
           result['profile']?['consent_version'] as int? ?? privacyVersion;
     }
-    name = proposedName;
+    if (proposedName.isNotEmpty) name = proposedName;
     preferences.addAll(choices);
     onboarded = true;
     notifyListeners();
@@ -256,6 +297,8 @@ class AiraController extends ChangeNotifier {
       }
     }
     messages.clear();
+    outbox.clear();
+    suggestedName = null;
     conversationId = activeCallId;
     pendingRequest = null;
     pendingText = null;
@@ -284,6 +327,91 @@ class AiraController extends ChangeNotifier {
   ) => (data[key] ?? data['items'] ?? [] as dynamic)
       .map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e))
       .toList();
+  void _watchDelivery(String id, ChatTurn turn, int session, int turnRevision) {
+    _deliveryPoll?.cancel();
+    Future<void> check() async {
+      if (!_current(session) || revision != turnRevision || !sending) return;
+      try {
+        final result = await api.request('GET', '/messages/$id/status');
+        if (!_current(session) || revision != turnRevision || !sending) return;
+        if (['processing', 'completed', 'failed'].contains(result['status'])) {
+          // Only a server-owned request record acknowledges delivery. A timer
+          // never turns Sending into Delivered or Read.
+          turn.delivery = MessageDelivery.delivered;
+          notifyListeners();
+        }
+      } catch (_) {
+        // A status failure is not evidence of failed delivery. Keep its last
+        // known state while the original message request is outstanding.
+      }
+      if (_current(session) && revision == turnRevision && sending) {
+        _deliveryPoll = Timer(const Duration(seconds: 1), check);
+      }
+    }
+
+    _deliveryPoll = Timer(const Duration(milliseconds: 500), check);
+  }
+
+  String? _nameFromFirstReply(String text) {
+    var value = text.trim().replaceFirst(RegExp(r'[.!]+$'), '');
+    final explicit = RegExp(
+      r"^(?:please call me|call me|my name is|i am|i'm)\s+(.+)$",
+      caseSensitive: false,
+    ).firstMatch(value);
+    if (explicit != null) value = explicit.group(1)!.trim();
+    if (value.isEmpty ||
+        value.length > 60 ||
+        value.split(RegExp(r'\s+')).length > 3 ||
+        !RegExp(
+          r"^[\p{L}\p{M}][\p{L}\p{M} .'-]*$",
+          unicode: true,
+        ).hasMatch(value)) {
+      return null;
+    }
+    if (explicit == null &&
+        RegExp(
+          r'\b(hi|hello|hey|thanks|thank|no|yes|skip|rather|prefer|chat|talk|feel|feeling|want|need|today|you|your|i|my|am|is)\b',
+          caseSensitive: false,
+        ).hasMatch(value)) {
+      return null;
+    }
+    return value;
+  }
+
+  Future<void> confirmPreferredName(String value) => _queuePreference(() async {
+    final proposed = value.trim();
+    if (proposed.isEmpty || proposed.length > 80) {
+      throw const AiraException('Please use a name of 1 to 80 characters.');
+    }
+    final session = sessionEpoch;
+    savingName = true;
+    notifyListeners();
+    try {
+      if (!preview && consent('memory_enabled')) {
+        final result = await api.request('PATCH', '/preferences', {
+          'display_name': proposed,
+        });
+        if (!_current(session)) return;
+        privacyVersion =
+            result['profile']?['consent_version'] as int? ?? privacyVersion;
+      }
+      if (!_current(session)) return;
+      // Without saved-memory consent the explicitly chosen name is session-only.
+      name = proposed;
+      suggestedName = null;
+    } finally {
+      if (_current(session)) {
+        savingName = false;
+        notifyListeners();
+      }
+    }
+  });
+
+  void dismissSuggestedName() {
+    suggestedName = null;
+    notifyListeners();
+  }
+
   Future<ChatTurn> send(
     String text, {
     String mode = 'text',
@@ -295,63 +423,115 @@ class AiraController extends ChangeNotifier {
         'Live AI is not connected in this preview. Your draft is kept.',
       );
     }
-    if (sending) throw const AiraException('Please wait for AIRA to finish.');
-    if (text.trim().isEmpty) {
+    if (sending) throw const AiraException('Please wait for Aira to finish.');
+    if (savingName) {
+      throw const AiraException('Please wait while your name is saved.');
+    }
+    final content = text.trim();
+    if (content.isEmpty) {
       throw const AiraException('Please write a message first.');
     }
-    sending = true;
-    notifyListeners();
     final epoch = revision;
     final session = sessionEpoch;
-    final id = pendingText == text && pendingRequest != null
+    final id = pendingText?.trim() == content && pendingRequest != null
         ? pendingRequest!
         : requestUuid();
     pendingText = text;
     pendingRequest = id;
-    final context = messages
-        .skip(max(0, messages.length - 10))
+    final prior = outbox.where((turn) => turn.id == id).firstOrNull;
+    final outgoing =
+        prior ??
+        ChatTurn(
+          text: content,
+          fromAira: false,
+          id: id,
+          delivery: MessageDelivery.sending,
+        );
+    if (prior == null) outbox.add(outgoing);
+    if (outgoing.delivery != MessageDelivery.delivered) {
+      outgoing.delivery = MessageDelivery.sending;
+    }
+    outgoing.issue = null;
+    final firstReply = mode == 'text' && name.isEmpty && messages.isEmpty;
+    final history = [...messages];
+    final opening = _introduction;
+    if (mode == 'text' && opening != null && history.isEmpty) {
+      history.add(opening);
+    }
+    final context = history
+        .skip(max(0, history.length - 10))
         .map((e) => {'role': e.fromAira ? 'assistant' : 'user', 'text': e.text})
         .toList();
+    sending = true;
+    notifyListeners();
+    _watchDelivery(id, outgoing, session, epoch);
     try {
       final result = await api.request('POST', '/messages', {
         'clientMessageId': id,
-        'text': text.trim(),
+        'text': content,
         'mode': mode,
         if (conversationId.isNotEmpty) 'conversationId': conversationId,
         'context': context,
         'contextVersion': privacyVersion,
+        'introductionShown': mode == 'text' && opening != null,
         if (cueSummary != null) 'cueSummary': cueSummary,
         if (feeling != null) 'selfReportedFeeling': feeling,
       });
       if (!_current(session) || epoch != revision) {
         throw const AiraException('This conversation has ended.');
       }
+      if (['processing', 'completed', 'failed'].contains(result['status'])) {
+        outgoing.delivery = MessageDelivery.delivered;
+      }
       if (result['text'] == null) {
-        throw const AiraException(
-          'That message is still processing or its reply has expired. Please retry shortly.',
+        throw AiraException(
+          outgoing.delivery == MessageDelivery.delivered
+              ? 'Your message reached Aira, but the reply is not available yet. Retry to check the same message.'
+              : 'Delivery is not confirmed. Retry to check the same message.',
         );
       }
       privacyVersion = result['privacyVersion'] as int? ?? privacyVersion;
       conversationId = result['conversationId']?.toString() ?? conversationId;
       final reply = ChatTurn(
-        text:
-            result['text']?.toString() ??
-            'No reply was returned. Please try again.',
+        text: result['text'].toString(),
         fromAira: true,
         id: result['messageId']?.toString(),
         speechToken: result['speechToken']?.toString(),
       );
-      messages.add(ChatTurn(text: text.trim(), fromAira: false, id: id));
+      outgoing.delivery = MessageDelivery.read;
+      outgoing.issue = null;
+      outbox.removeWhere((turn) => turn.id == id);
+      messages.add(outgoing);
       messages.add(reply);
+      if (firstReply) suggestedName = _nameFromFirstReply(content);
       pendingText = null;
       pendingRequest = null;
       return reply;
+    } catch (e) {
+      if (_current(session) && epoch == revision) {
+        if (outgoing.delivery != MessageDelivery.delivered) {
+          outgoing.delivery = MessageDelivery.unconfirmed;
+        }
+        outgoing.issue = cleanError(e);
+      }
+      rethrow;
     } finally {
       if (_current(session) && epoch == revision) {
+        _deliveryPoll?.cancel();
+        _deliveryPoll = null;
         sending = false;
         notifyListeners();
       }
     }
+  }
+
+  Future<ChatTurn> retryMessage(ChatTurn message) {
+    if (sending || !outbox.contains(message)) {
+      throw const AiraException('This message cannot be retried right now.');
+    }
+    pendingText = message.text;
+    pendingRequest = message.id;
+    return send(message.text);
   }
 
   Future<void> saveMemory(String text) async {
@@ -384,6 +564,8 @@ class AiraController extends ChangeNotifier {
     }
     memories.removeWhere((e) => e['id'] == memory['id']);
     messages.clear();
+    outbox.clear();
+    suggestedName = null;
     conversationId = '';
     notifyListeners();
   }
@@ -525,9 +707,60 @@ class AiraController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<Map<String, dynamic>> beginRealtimeCall(String mode) async {
+    if (preview) {
+      throw const AiraException(
+        'Live calls are not connected in this preview.',
+      );
+    }
+    cancelSend();
+    messages.clear();
+    outbox.clear();
+    pendingRequest = null;
+    pendingText = null;
+    conversationId = '';
+    final turnRevision = revision;
+    final session = sessionEpoch;
+    final service = api;
+    final result = await service.request('POST', '/calls/session', {
+      'mode': mode,
+    });
+    final id = result['conversationId']?.toString() ?? '';
+    if (!_current(session) || turnRevision != revision) {
+      if (_current(session) && id.isNotEmpty) {
+        try {
+          await service.request('POST', '/calls/$id/end', {});
+        } catch (_) {}
+      }
+      throw const AiraException('This call has ended.');
+    }
+    if (id.isEmpty || result['conversationToken'] is! String) {
+      throw const AiraException(
+        'Aira could not connect this call. Please try again.',
+      );
+    }
+    conversationId = id;
+    activeCallId = id;
+    notifyListeners();
+    return result;
+  }
+
+  Future<void> publishCallContext({
+    Map<String, dynamic>? cueSummary,
+    String? selfReportedFeeling,
+  }) async {
+    if (preview || activeCallId.isEmpty) return;
+    final id = activeCallId;
+    await api.request('PATCH', '/calls/$id/context', {
+      'cueSummary': cueSummary,
+      'selfReportedFeeling': selfReportedFeeling,
+    });
+  }
+
   Future<void> beginCall(String mode) async {
     cancelSend();
     messages.clear();
+    outbox.clear();
     pendingRequest = null;
     pendingText = null;
     conversationId = '';
@@ -556,6 +789,8 @@ class AiraController extends ChangeNotifier {
     final id = activeCallId;
     activeCallId = '';
     conversationId = '';
+    messages.clear();
+    outbox.clear();
     pendingText = null;
     pendingRequest = null;
     if (!preview && id.isNotEmpty) {
@@ -597,6 +832,7 @@ class AiraController extends ChangeNotifier {
     if (action == 'accept') {
       cancelSend();
       messages.clear();
+      outbox.clear();
       conversationId = result['event']?['conversation_id']?.toString() ?? '';
       tab = 0;
     }
@@ -642,6 +878,8 @@ class AiraController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _deliveryPoll?.cancel();
+    _deliveryPoll = null;
     _disposed = true;
     _sessionEpoch++;
     revision++;

@@ -13,7 +13,6 @@ class OnboardingScreen extends StatefulWidget {
 }
 
 class _OnboardingState extends State<OnboardingScreen> {
-  final name = TextEditingController();
   int step = 0;
   bool busy = false;
   final choices = <String, dynamic>{
@@ -24,16 +23,10 @@ class _OnboardingState extends State<OnboardingScreen> {
     'impact_measurement': false,
     'monitoring_enabled': false,
   };
-  @override
-  void dispose() {
-    name.dispose();
-    super.dispose();
-  }
-
   Future<void> finish() async {
     setState(() => busy = true);
     try {
-      await widget.controller.finishOnboarding(name.text, choices);
+      await widget.controller.finishOnboarding('', choices);
     } catch (e) {
       if (mounted) showMessage(context, AiraController.cleanError(e));
     } finally {
@@ -98,13 +91,10 @@ class _OnboardingState extends State<OnboardingScreen> {
                     textAlign: TextAlign.center,
                   ),
                   const AiraGap(height: 28),
-                  TextField(
-                    controller: name,
-                    decoration: const InputDecoration(
-                      labelText: 'What would you like me to call you?',
-                      hintText: 'Your preferred name (optional)',
-                    ),
-                    textCapitalization: TextCapitalization.words,
+                  const Text(
+                    'Let’s get comfortable first. Aira will introduce itself when we start chatting.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: AiraColors.muted),
                   ),
                   const AiraGap(height: 16),
                   SwitchListTile(
