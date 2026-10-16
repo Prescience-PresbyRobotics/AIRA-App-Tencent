@@ -11,6 +11,7 @@ import 'chat.dart';
 import 'personal.dart';
 import 'settings.dart';
 import 'dashboard.dart';
+import 'dashboard/sample_data.dart';
 import 'call.dart';
 
 class AiraShell extends StatefulWidget {
@@ -22,6 +23,7 @@ class AiraShell extends StatefulWidget {
 }
 
 class _ShellState extends State<AiraShell> with WidgetsBindingObserver {
+  final DashboardSampleStore _dashboardSamples = DashboardSampleStore();
   Timer? _timer;
   bool _polling = false, _active = true, _responding = false;
   bool _showingIncoming = false;
@@ -82,6 +84,7 @@ class _ShellState extends State<AiraShell> with WidgetsBindingObserver {
   @override
   void dispose() {
     _timer?.cancel();
+    _dashboardSamples.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -162,7 +165,11 @@ class _ShellState extends State<AiraShell> with WidgetsBindingObserver {
     final ctl = widget.controller;
     final wide = MediaQuery.sizeOf(c).width >= 1000;
     Widget content = care != null
-        ? DashboardScreen(controller: ctl, admin: care == 'admin')
+        ? DashboardScreen(
+            controller: ctl,
+            admin: care == 'admin',
+            sampleStore: _dashboardSamples,
+          )
         : switch (ctl.tab) {
             0 => ChatScreen(controller: ctl),
             1 => PersonalScreen(controller: ctl),

@@ -289,7 +289,9 @@ Current update verification: 49 backend tests and 89 Flutter tests passed; migra
 
 ## Protected care views
 
-Open **Settings → Care connections → Caregiver view / Admin dashboard** (or desktop sidebar buttons). The screen is reachable without granting access; signed-in data still needs a verified link or staff assignment. **Explore the interface** exposes synthetic examples without account privileges.
+Open **Settings → Care connections → Caregiver view / Admin dashboard** (or desktop sidebar buttons). Both now default to a fictional **Sample workspace** with in-memory editors and charts. No sample records are inserted into Supabase, and sample password-reset, account, access, medication, history and privacy actions never call real account APIs. These simulate the proposed delegated-management workflows; production editing APIs and permission scopes have not been expanded.
+
+Signed-in users can select **Live records** to reach the existing protected dashboard. Live data still requires a verified link or staff assignment plus the senior's sharing choices. **Explore the interface** exposes the sample workspace without account privileges. Samples and live records are never combined in charts or review queues.
 
 Create separate Supabase test accounts. Trusted operators provision
 `role_assignments` and `caregiver_links` through a reviewed server/admin

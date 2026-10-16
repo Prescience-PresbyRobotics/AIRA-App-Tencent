@@ -4,7 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:aira/controller.dart';
 import 'package:aira/services/aira_api.dart';
-import 'package:aira/screens/dashboard.dart';
+import 'package:aira/screens/live_dashboard.dart';
 
 class FakeApi extends AiraApi {
   FakeApi(this.handler)
@@ -72,7 +72,7 @@ Future<void> show(WidgetTester tester, FakeController controller,
   addTearDown(tester.view.resetDevicePixelRatio);
   await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-          body: DashboardScreen(controller: controller, admin: admin))));
+          body: LiveDashboardScreen(controller: controller, admin: admin))));
   await tester.pumpAndSettle();
 }
 
@@ -121,7 +121,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(MaterialApp(
-        home: Scaffold(body: DashboardScreen(controller: ctl, admin: false))));
+        home: Scaffold(body: LiveDashboardScreen(controller: ctl, admin: false))));
     await tester.pump();
     ctl.switchAccount();
     await tester.pumpAndSettle();
