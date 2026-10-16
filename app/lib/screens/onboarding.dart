@@ -16,7 +16,7 @@ class _OnboardingState extends State<OnboardingScreen> {
   int step = 0;
   bool busy = false;
   final choices = <String, dynamic>{
-    'store_conversations': false,
+    'store_conversations': true,
     'memory_enabled': false,
     'social_reminders': false,
     'medication_reminders': false,
@@ -126,7 +126,7 @@ class _OnboardingState extends State<OnboardingScreen> {
                   _choice(
                     'store_conversations',
                     'Save our conversations',
-                    'Return to your conversation later.',
+                    'Keep chat and call transcripts across visits until you delete them. Turn off for session-only chat.',
                   ),
                   _choice(
                     'memory_enabled',

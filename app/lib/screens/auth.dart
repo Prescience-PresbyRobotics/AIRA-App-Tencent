@@ -284,7 +284,7 @@ class _AuthScreenState extends State<AuthScreen> {
               ),
               const AiraGap(height: 12),
               const Text(
-                'Preview only · No account needed\nLive AI and cloud saving need service setup.',
+                'Preview only · No account needed\nSign in for live calls and saved conversations.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 13,

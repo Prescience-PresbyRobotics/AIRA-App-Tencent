@@ -449,35 +449,237 @@ void main() {
     },
   );
 
-  test('call context explicitly clears both cues and End removes temporary buffers', () async {
-    api.respond = (_) async => {};
-    controller.activeCallId = 'current-call';
-    controller.conversationId = 'current-call';
-    await controller.publishCallContext(
-      cueSummary: {'label': 'happy'},
-      selfReportedFeeling: 'sad',
-    );
-    expect(api.calls.last.path, '/calls/current-call/context');
-    expect(api.calls.last.data!['selfReportedFeeling'], 'sad');
-    await controller.publishCallContext();
-    expect(api.calls.last.data, {
-      'cueSummary': null,
-      'selfReportedFeeling': null,
-    });
-    controller.messages.add(
-      ChatTurn(text: 'Private spoken turn', fromAira: false),
-    );
-    controller.outbox.add(
-      ChatTurn(
-        text: 'Waiting spoken turn',
-        fromAira: false,
-        delivery: MessageDelivery.sending,
-      ),
-    );
+  test(
+    'call context clears cues and End preserves the chat timeline',
+    () async {
+      api.respond = (_) async => {};
+      controller.activeCallId = 'current-call';
+      controller.conversationId = 'current-call';
+      await controller.publishCallContext(
+        cueSummary: {'label': 'happy'},
+        selfReportedFeeling: 'sad',
+      );
+      expect(api.calls.last.path, '/calls/current-call/context');
+      expect(api.calls.last.data!['selfReportedFeeling'], 'sad');
+      await controller.publishCallContext();
+      expect(api.calls.last.data, {
+        'cueSummary': null,
+        'selfReportedFeeling': null,
+      });
+      controller.messages.add(
+        ChatTurn(text: 'Private spoken turn', fromAira: false),
+      );
+      controller.outbox.add(
+        ChatTurn(
+          text: 'Waiting spoken turn',
+          fromAira: false,
+          delivery: MessageDelivery.sending,
+        ),
+      );
+      await controller.endCall();
+      expect(controller.messages.single.text, 'Private spoken turn');
+      expect(controller.outbox.single.delivery, MessageDelivery.cancelled);
+      expect(controller.activeCallId, isEmpty);
+      expect(api.calls.last.path, '/calls/current-call/end');
+    },
+  );
+  test(
+    'bootstrap restores saved history and pagination merges without duplicates',
+    () async {
+      Map<String, dynamic> turn(String id, String text, String at) => {
+        'id': id,
+        'text': text,
+        'role': 'assistant',
+        'createdAt': at,
+        'contextVersion': 4,
+        'mode': 'text',
+      };
+      api.respond = (call) async {
+        if (call.path == '/me') {
+          return {
+            'profile': {'onboarded': true, 'consent_version': 4},
+            'preferences': {'store_conversations': true},
+          };
+        }
+        if (call.path == '/history') {
+          return {
+            'messages': [
+              turn('latest', 'Welcome back', '2026-10-16T10:00:00Z'),
+            ],
+            'nextCursor': '10',
+            'conversationId': 'saved-text-thread',
+            'privacyVersion': 4,
+          };
+        }
+        if (call.path == '/history?before=10') {
+          return {
+            'messages': [turn('older', 'Last week', '2026-10-09T10:00:00Z')],
+            'nextCursor': null,
+            'privacyVersion': 4,
+          };
+        }
+        throw StateError('Unexpected request ${call.path}');
+      };
+      await controller.bootstrap();
+      expect(controller.messages.single.text, 'Welcome back');
+      expect(controller.conversationId, 'saved-text-thread');
+      expect(controller.showIntroduction, isFalse);
+      expect(controller.hasOlderHistory, isTrue);
+      await controller.refreshHistory(older: true);
+      expect(controller.messages.map((m) => m.text), [
+        'Last week',
+        'Welcome back',
+      ]);
+      expect(controller.hasOlderHistory, isFalse);
+      await controller.refreshHistory();
+      expect(controller.messages, hasLength(2));
+      expect(controller.messages.every((m) => m.speechToken == null), isTrue);
+    },
+  );
+
+  test(
+    'history response cannot cross account or storage opt-out boundaries',
+    () async {
+      controller.preferences['store_conversations'] = true;
+      final completion = Completer<Map<String, dynamic>>();
+      api.respond = (call) async {
+        if (call.path == '/history') return completion.future;
+        return {
+          'profile': {'consent_version': 2},
+        };
+      };
+      final loading = controller.refreshHistory();
+      await controller.updatePreference('store_conversations', false);
+      completion.complete({
+        'messages': [
+          {
+            'id': 'private',
+            'text': 'Private history',
+            'role': 'user',
+            'createdAt': '2026-10-16T10:00:00Z',
+          },
+        ],
+      });
+      await loading;
+      expect(controller.messages, isEmpty);
+      expect(controller.historyLoading, isFalse);
+      expect(controller.historyLoaded, isFalse);
+    },
+  );
+
+  test('calls preserve the text thread and existing saved messages', () async {
+    controller.messages = [ChatTurn(text: 'Before our call', fromAira: false)];
+    controller.conversationId = 'text-thread';
+    api.respond = (call) async => call.path == '/calls/session'
+        ? {
+            'conversationId': 'live-call',
+            'conversationToken': 'temporary-token',
+          }
+        : {};
+    await controller.beginRealtimeCall('voice');
+    expect(controller.conversationId, 'text-thread');
+    expect(controller.activeCallId, 'live-call');
+    expect(controller.messages.single.text, 'Before our call');
     await controller.endCall();
-    expect(controller.messages, isEmpty);
-    expect(controller.outbox, isEmpty);
-    expect(controller.activeCallId, isEmpty);
-    expect(api.calls.last.path, '/calls/current-call/end');
+    expect(controller.conversationId, 'text-thread');
+    expect(controller.messages.single.text, 'Before our call');
   });
+  test(
+    'forgetting retains the archive but never reuses its old model context',
+    () async {
+      controller.preferences['memory_enabled'] = true;
+      controller.preferences['store_conversations'] = true;
+      controller.messages = [
+        ChatTurn(
+          text: 'My old personal detail',
+          fromAira: false,
+          contextVersion: 1,
+        ),
+        ChatTurn(text: 'I will remember', fromAira: true, contextVersion: 1),
+      ];
+      controller.memories = [
+        {'id': 'old-memory', 'text': 'Old personal detail'},
+      ];
+      api.respond = (call) async => call.method == 'DELETE'
+          ? {'privacyVersion': 2}
+          : approvedReply('Fresh conversation', privacyVersion: 2);
+      await controller.forgetMemory(controller.memories.single);
+      expect(controller.messages, hasLength(2));
+      expect(controller.memories, isEmpty);
+      await controller.send('Something new');
+      expect(api.calls.last.data!['context'], isEmpty);
+      expect(controller.messages, hasLength(4));
+    },
+  );
+  test('reload restores Delivered and then changes to Read when saved reply appears', () async {
+    controller.preferences['store_conversations'] = true;
+    var completed = false;
+    final at = DateTime.now().toUtc().toIso8601String();
+    api.respond = (_) async => {
+      'messages': [
+        {
+          'id': 'user-turn',
+          'text': 'Still there?',
+          'role': 'user',
+          'createdAt': at,
+          'requestStatus': completed ? 'completed' : 'processing',
+          'delivery': completed ? 'read' : 'delivered',
+          'order': '1',
+        },
+        if (completed)
+          {
+            'id': 'reply-turn',
+            'text': 'Right here',
+            'role': 'assistant',
+            'createdAt': at,
+            'delivery': 'read',
+            'requestStatus': 'completed',
+            'order': '2',
+          },
+      ],
+      'privacyVersion': 1,
+      'nextCursor': null,
+    };
+    await controller.refreshHistory();
+    expect(controller.messages.single.delivery, MessageDelivery.delivered);
+    expect(controller.historyAwaitingReply, isTrue);
+    completed = true;
+    await controller.refreshHistory();
+    expect(controller.messages.map((m) => m.text), [
+      'Still there?',
+      'Right here',
+    ]);
+    expect(controller.messages.first.delivery, MessageDelivery.read);
+    expect(controller.historyAwaitingReply, isFalse);
+  });
+  test(
+    'history refresh during a send cannot duplicate its outgoing bubble',
+    () async {
+      controller.preferences['store_conversations'] = true;
+      final reply = Completer<Map<String, dynamic>>();
+      api.respond = (call) async {
+        if (call.method == 'POST') return reply.future;
+        return {
+          'messages': [
+            {
+              'id': controller.pendingRequest,
+              'text': 'In flight',
+              'role': 'user',
+              'createdAt': DateTime.now().toUtc().toIso8601String(),
+              'requestStatus': 'processing',
+              'delivery': 'delivered',
+            },
+          ],
+          'privacyVersion': 1,
+        };
+      };
+      final sending = controller.send('In flight');
+      await controller.refreshHistory();
+      expect(controller.messages, hasLength(1));
+      reply.complete(approvedReply('Got it'));
+      await sending;
+      expect(controller.messages.map((m) => m.text), ['In flight', 'Got it']);
+      expect(controller.outbox, isEmpty);
+    },
+  );
 }

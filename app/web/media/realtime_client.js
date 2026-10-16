@@ -4,9 +4,13 @@
   const base = new URL('.', document.currentScript.src);
   const state = {realtimeStatus: 'idle', callMode: 'listening', micMuted: false,
     voiceConversationId: null, userCaption: null, agentCaption: null,
-    realtimeError: null, realtimeConnectedAt: null};
+    realtimeError: null, realtimeConnectedAt: null, speakerMuted: false,
+    inputLevel: 0, outputLevel: 0, awaitingReply: false, microphoneIssue: null,
+    microphoneName: null, selectedMicrophoneId: null, availableMicrophones: [],
+    changingMicrophone: false};
   let sdkPromise, session, pendingStart, pendingEnd, guard;
   let epoch = 0;
+  let deviceChangeListener, microphoneSelectionError;
   const tracks = new Set();
 
   function prepare() {
@@ -49,7 +53,7 @@
       stream.getAudioTracks().forEach(track => {
         tracks.add(track);
         track.enabled = !state.micMuted;
-        track.addEventListener('ended', () => tracks.delete(track), {once: true});
+        track.addEventListener('ended', () => { tracks.delete(track); inspectMicrophone(); }, {once: true});
       });
       return stream;
     };
@@ -57,9 +61,71 @@
     devices.getUserMedia = owner.wrapper;
     return owner;
   }
+  function liveTracks() {
+    // The official SDK opens a permission stream, then a distinct LiveKit
+    // stream. It stops the first stream itself, without dispatching `ended`.
+    // Only the second, still-live stream is evidence of active capture.
+    for (const track of tracks) if (track.readyState === 'ended') tracks.delete(track);
+    return [...tracks].filter(track => track.readyState !== 'ended');
+  }
+  function inspectMicrophone() {
+    if (state.realtimeStatus !== 'connected' || state.changingMicrophone) return;
+    const live = liveTracks();
+    const track = live.at(-1);
+    state.microphoneName = track?.label || null;
+    state.selectedMicrophoneId = track?.getSettings?.().deviceId || state.selectedMicrophoneId;
+    state.microphoneIssue = microphoneSelectionError || (!track ? 'Your microphone disconnected. Choose another microphone or start the call again.'
+      : !state.micMuted && track.muted ? 'Your device has paused the microphone. Check its microphone permission or choose another input.'
+      : !state.micMuted && !track.enabled ? 'Your microphone is not sending audio. Unmute it or choose another input.' : null);
+  }
+  function level(value) {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? Math.round(Math.min(1, Math.max(0, value)) * 100) / 100 : 0;
+  }
+  function snapshot() {
+    inspectMicrophone();
+    try {
+      state.inputLevel = session && !state.micMuted ? level(session.getInputVolume()) : 0;
+      state.outputLevel = session && !state.speakerMuted ? level(session.getOutputVolume()) : 0;
+    } catch (_) { state.inputLevel = 0; state.outputLevel = 0; }
+    return {...state, availableMicrophones: state.availableMicrophones.map(device => ({...device}))};
+  }
+  async function refreshMicrophones() {
+    // Enumeration never requests permission. Labels appear only after the
+    // user's microphone permission, and are displayed locally, not uploaded.
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    const request = epoch;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      if (request !== epoch || state.realtimeStatus !== 'connected') return;
+      state.availableMicrophones = devices.filter(device => device.kind === 'audioinput' && device.deviceId)
+        .map((device, index) => ({id: device.deviceId, label: device.label || `Microphone ${index + 1}`}));
+      inspectMicrophone();
+    } catch (_) { /* Some browsers cannot enumerate devices; default input still works. */ }
+  }
+  async function changeMicrophone(deviceId) {
+    if (!session || state.realtimeStatus !== 'connected' || state.changingMicrophone) return;
+    if (typeof deviceId !== 'string' || !deviceId) return;
+    const request = epoch;
+    state.changingMicrophone = true;
+    microphoneSelectionError = null; state.microphoneIssue = null;
+    try {
+      // The SDK owns publishing/replacing the WebRTC track. WebRTC accepts
+      // inputDeviceId only; sampleRate/format options throw in SDK 1.28.0.
+      await session.changeInputDevice({inputDeviceId: deviceId});
+      if (cancelled(request)) return;
+      state.selectedMicrophoneId = deviceId;
+    } catch (_) {
+      if (!cancelled(request)) microphoneSelectionError = 'That microphone could not connect. Choose another microphone or check device permissions.';
+    } finally {
+      if (!cancelled(request)) { state.changingMicrophone = false; await refreshMicrophones(); }
+    }
+  }
   function safeError(error) {
     if (error?.name === 'NotAllowedError') return 'Microphone access was not allowed. You can return to text chat.';
     if (error?.name === 'NotFoundError') return 'No microphone was found. Please connect one or use text chat.';
+    if (error?.name === 'NotReadableError') return 'Your microphone is in use or unavailable. Close other calling apps and try again.';
+    if (error?.name === 'SecurityError') return 'This browser has blocked microphone access. Allow microphone access in the site settings.';
     return 'The voice call could not connect. Please check your connection and start again.';
   }
   function stop() {
@@ -70,6 +136,12 @@
     state.realtimeStatus = 'disconnected';
     state.callMode = 'listening';
     state.micMuted = false;
+    state.speakerMuted = false;
+    state.inputLevel = 0; state.outputLevel = 0; state.awaitingReply = false;
+    microphoneSelectionError = null; state.microphoneIssue = null; state.microphoneName = null;
+    state.selectedMicrophoneId = null; state.availableMicrophones = []; state.changingMicrophone = false;
+    if (deviceChangeListener) navigator.mediaDevices?.removeEventListener?.('devicechange', deviceChangeListener);
+    deviceChangeListener = null;
     state.realtimeConnectedAt = null;
     state.voiceConversationId = null;
     // Captions are session-only and disappear when the call ends.
@@ -89,6 +161,8 @@
     state.realtimeError = null;
     state.realtimeStatus = 'loading';
     state.micMuted = false;
+    state.speakerMuted = false; state.awaitingReply = false;
+    microphoneSelectionError = null; state.microphoneIssue = null; state.inputLevel = 0; state.outputLevel = 0;
     state.userCaption = null; state.agentCaption = null;
     try {
       await pendingEnd;
@@ -103,6 +177,10 @@
       const begin = window.ElevenLabsClient.Conversation.startSession({
         conversationToken: config.conversationToken,
         connectionType: 'webrtc',
+        // LiveKit 2.21 defaults to the newer single-PC negotiation, which can
+        // fail before capture on WebKit with an unsupported setConfiguration.
+        // Use the SDK's supported dual-PC compatibility path (ElevenLabs #960).
+        webRtc: {singlePeerConnection: false},
         customLlmExtraBody: {aira_session_token: config.customLlmExtraBody.aira_session_token},
         dynamicVariables: config.dynamicVariables || {},
         useWakeLock: false,
@@ -122,13 +200,13 @@
           if (!cancelled(request)) state.realtimeStatus = status;
         },
         onModeChange: ({mode}) => {
-          if (!cancelled(request)) state.callMode = mode;
+          if (!cancelled(request)) { state.callMode = mode; if (mode === 'speaking') state.awaitingReply = false; }
         },
         onMessage: ({message, role, source}) => {
           if (cancelled(request) || typeof message !== 'string') return;
           const text = message.slice(0, 6000);
-          if (role === 'user' || source === 'user') state.userCaption = text;
-          else if (role === 'agent' || source === 'ai') state.agentCaption = text;
+          if (role === 'user' || source === 'user') { state.userCaption = text; state.awaitingReply = true; }
+          else if (role === 'agent' || source === 'ai') { state.agentCaption = text; state.awaitingReply = false; }
         },
         onInterruption: () => { if (!cancelled(request)) state.callMode = 'listening'; },
         onAgentResponseCorrection: event => {
@@ -159,6 +237,12 @@
         state.realtimeStatus = 'connected';
         state.voiceConversationId = connected.getId();
         state.realtimeConnectedAt ??= Date.now();
+        // Confirm the provider's actual audio capture, not merely its transport
+        // connection. Never leave an apparently listening UI without an input.
+        inspectMicrophone();
+        deviceChangeListener = () => { void refreshMicrophones(); };
+        navigator.mediaDevices.addEventListener?.('devicechange', deviceChangeListener);
+        await refreshMicrophones();
       } catch (error) {
         if (created) await created.endSession().catch(() => {});
         throw error;
@@ -182,12 +266,19 @@
       state.realtimeError = 'Microphone control failed. The call has been stopped.'; stop();
     }
   }
+  function speakerMute(value) {
+    if (!session || state.realtimeStatus !== 'connected') return;
+    state.speakerMuted = Boolean(value);
+    try { session.setVolume({volume: state.speakerMuted ? 0 : 1}); } catch (_) {
+      state.realtimeError = 'Call audio could not be adjusted. Please start the call again.';
+    }
+  }
   function interrupt() {
     if (!session || state.realtimeStatus !== 'connected') return;
     // User activity asks the server to pause speech. Normal spoken barge-in is
     // handled by ElevenLabs VAD/interruption events and the WebRTC SDK itself.
     session.sendUserActivity();
   }
-  window.airaRealtime = Object.freeze({prepare, start, stop, mute, interrupt,
-    snapshot: () => ({...state})});
+  window.airaRealtime = Object.freeze({prepare, start, stop, mute, speakerMute, interrupt,
+    refreshMicrophones, changeMicrophone, snapshot});
 })();

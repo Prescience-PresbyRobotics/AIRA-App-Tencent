@@ -18,12 +18,12 @@ The backend accepts Supabase's injected modern `SUPABASE_SECRET_KEYS` dictionary
   User-editable Auth metadata never grants a role.
 - Explicit consent choices, confirmed memories, one-time foreground reminders,
   invitation acceptance/decline, medication Taken/Skip/Snooze self-reports,
-  deletion, and 24-hour content expiry.
+  deletion, durable opted-in chat history, and 24-hour expiry for other prototype content.
 - OpenAI Responses requests with an explicit environment-selected model and
   `store:false`. Replies are buffered and screened using strict structured
   output before release. Invalid/unavailable screening substitutes fixed support
   copy; unchecked replies are not displayed or spoken.
-- A realtime ElevenLabs session route plus an `aira-realtime` custom-LLM gate reuse the same screened OpenAI path. Account/consent-bound session tokens expire after 15 minutes. The gate holds the full response until approved, then returns it to ElevenLabs for speech; expect additional latency. Provider WebSocket behavior is verified; browser microphone/WebRTC and physical-device behavior remain pending.
+- A realtime ElevenLabs session route plus an `aira-realtime` custom-LLM gate reuse the same screened OpenAI path. Account/consent-bound session tokens expire after 15 minutes. The gate holds the full response until approved, then returns it to ElevenLabs for speech; expect additional latency. Generated spoken audio passed both provider WebSocket and browser WebRTC recognition/reply checks. Physical microphone/device behavior remains to verify; see the [live-call guide](../app/web/media/REALTIME-CALLS.md).
 - ElevenLabs bounded transcription and speech remain available. Speech requires a signed five-minute
   approved-reply token bound to account, request and current consent version.
   The API accepts no arbitrary text-to-speech request.
@@ -192,6 +192,8 @@ wrapper/ID fields below are camelCase.
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /v1/me`                                     | `{profile,preferences,capabilities,roles}`. `profile.consent_version` is the current privacy version.                                                                                                                                                                                                                                        |
 | `PATCH /v1/preferences`                          | Profile: `display_name`, `timezone`, `text_scale` (1–2), `reduced_motion`, `onboarded`, `locale:'en'`. Consent choices can use canonical `consents:{...}` or flat Flutter aliases below. Returns updated `{profile,preferences}`.                                                                                                            |
+| `GET /v1/history?before=<cursor>` | Owner-only saved chat and call transcripts, oldest-to-newest within each 50-message page. Returns `{messages,nextCursor,conversationId,privacyVersion}`; omit `before` for the latest page. |
+| `DELETE /v1/history` | Deletes owned conversation history, invalidates active calls/context and returns `{deleted,privacyVersion}`. Saved-memory and reminder controls remain separate. |
 | `POST /v1/messages`                              | `{clientMessageId,text,mode,conversationId?,contextVersion?,context?:[{role,text}],introductionShown?,cueSummary?:{label,observedAt},selfReportedFeeling?}`. Returns `{conversationId,messageId,text,status,speechToken,privacyVersion,provider}`. Max 2,000 characters, 10 submissions/minute and 20/hour/account. `status` is approved/support/safe_fallback. |
 | `GET /v1/messages/:clientMessageId/status` | Owner-scoped acknowledgement: `{status:'processing' or 'completed' or 'failed' or 'not_found',createdAt?}`. Delivered requires a server record; Read means an actual Aira reply returned, not human attention. |
 | `POST /v1/audio/transcriptions`                  | `{audioBase64,mimeType,locale:'en'}` → `{text,editable:true,provider:'elevenlabs'}`. Max 5,000,000 decoded bytes; base MIME supports webm/mp4/wav/ogg/mpeg, with codec suffixes normalized.                                                                                                                                                  |
@@ -221,16 +223,19 @@ wrapper/ID fields below are camelCase.
 
 Canonical consent keys are `conversation_storage`, `memory`, `social_reminders`,
 `medication_reminders`, `monitoring`, `impact`, `mood_history`, `face_cues`,
-`urgent_sharing`, `reviewed_sharing`, `admin_insights`. All start false. Flutter
+`urgent_sharing`, `reviewed_sharing`, `admin_insights`. Database defaults stay false; new Flutter onboarding visibly preselects conversation saving and submits the chosen switch value when the user continues. Existing opt-outs are preserved. Flutter
 aliases are `store_conversations`, `memory_enabled`, `monitoring_enabled`,
 `impact_measurement`; other names stay unchanged. Unknown/role fields are
 rejected. Changes invalidate speech tokens. Withdrawal purges category content
 and blocks queued access.
 
+Saved chats and call transcripts persist until the owner clears history, turns conversation saving off, or deletes account data. Migration `202610160002_durable_history.sql` preserves only unexpired messages from owners who already opted in; previously expired/deleted content cannot be recovered. Their parent conversation and request records share durable retention to prevent cascading expiry. Migration `202610160003_pending_history.sql` also saves an opted-in user message before provider processing, so reopening during a reply restores it as Delivered. A recent pending reply is checked again until completion; only an actual saved reply changes it to Read. Other prototype categories keep their existing lifetimes. Conversation activity in the current dashboard is still limited to its 24-hour measurement window.
+
+Account bootstrap restores the latest 50 saved messages and the active text thread. Earlier messages are loaded using an exclusive sequence cursor; new messages and equal timestamps cannot shift older pages. Voice/video transcripts appear in the same timeline with a call icon after the call ends. Starting or ending a call does not clear the text history. Owner checks and RLS apply, and account/consent changes reject late history responses. The client keeps provider playback tokens only in memory, never in persisted history. The interface preview has no live replies and does not create a fake saved conversation.
+
 Without conversation storage, the client sends at most ten recent turns with
 **`contextVersion == profile.consent_version`**; the server persists no
-transcript. Clear that buffer on logout, account change, conversation deletion
-and memory edit/forget. A completed duplicate request can return `text:null` in
+transcript. Clear that buffer on logout, account change and conversation deletion. Memory edit/forget increments the privacy version: existing history stays visible, but older-version turns are omitted from future model context by both client and server. A completed duplicate request can return `text:null` in
 no-storage mode because the server cannot reconstitute a deleted reply; retain
 the original response in the active client buffer, or invite an explicit fresh
 message. Do not silently submit a new ID to retry a completed request. Provider
@@ -290,7 +295,7 @@ quality, medical accuracy or device accessibility.
 
 ### Live integration smoke test
 
-On 16 October, 30 Deno tests and 43 Flutter tests passed. Browser UI checks verified the greeting/cards; the final frontend, including signup verification wording and media cache updates, is built and deployed to Firebase Hosting.
+Latest 16 October validation passed 34 Deno and 59 Flutter tests. Saved history survived a new login and an actual browser-tab close/reopen. The browser WebRTC test passed recognition and spoken reply from generated input after correcting the SDK peer-connection compatibility option. Physical-device acceptance is separate.
 
 The 16 October live synthetic run passed Auth/API access and screened OpenAI (6.62 s), original-voice TTS (4.39 s), STT (2.01 s), WebRTC token issuance (1.90 s), and direct screened custom-LLM bridge output (5.78 s). An actual ElevenLabs WebSocket connection returned its greeting and a matching reply with 159,760 audio bytes, plus an interruption event; the whole connection lasted 10.9 s. End/token revocation and synthetic-account cleanup were verified. These are individual observations, not a latency guarantee. Private-agent auth, custom LLM with no fallback, `record_voice:false` and `retention_days:0` were confirmed in saved configuration.
 
@@ -344,7 +349,7 @@ Cleanup verifies the account's synthetic marker before deleting it. Keys, sessio
   comparisons and aggregate suppression are not implemented. Never use synthetic
   history as measured impact.
 - This implementation uses stricter 24-hour incident/report expiry as well as
-  24-hour content expiry. Content-free audit is seven days. Account/security
+  24-hour expiry for memories, reminders and wellbeing content. Opted-in conversation history instead lasts until deleted as described above. Content-free audit is seven days. Account/security
   rows remain until separate account deletion. Provider usage metadata is
   trimmed after 24 hours when new media usage arrives; configure broader
   operational cleanup for a pilot.

@@ -52,6 +52,27 @@ Deno.serve(async (req) => {
     const operation = await req.json().catch(() => ({}));
     if (env("ELEVENLABS_AGENT_ID") && operation.action !== "voices") {
       const agentId = encodeURIComponent(env("ELEVENLABS_AGENT_ID"));
+      if (operation.action === "configure-audio") {
+        // General conversation uses balanced turn-taking. Keep all existing
+        // authentication, retention, voice and screened-LLM settings intact.
+        await api(`agents/${agentId}`, "PATCH", {
+          conversation_config: {
+            asr: { quality: "high", provider: "scribe_realtime" },
+            turn: {
+              turn_eagerness: "normal",
+              turn_timeout: 8,
+              soft_timeout_config: {
+                timeout_seconds: 2.5,
+                message: "Hmm, let me think.",
+                use_llm_generated_message: false,
+                max_soft_timeouts_per_generation: 1,
+                disable_until_first_user_message: true,
+              },
+            },
+            agent: { prompt: { cascade_timeout_seconds: 15 } },
+          },
+        });
+      }
       const path = operation.action === "connection-test"
         ? `conversation/get-signed-url?agent_id=${agentId}`
         : `agents/${agentId}`;
@@ -73,6 +94,12 @@ Deno.serve(async (req) => {
         model: b.conversation_config?.agent?.prompt?.llm,
         customLlmUrl: b.conversation_config?.agent?.prompt?.custom_llm?.url,
         backup: b.conversation_config?.agent?.prompt?.backup_llm_config,
+        llmTimeout: b.conversation_config?.agent?.prompt?.cascade_timeout_seconds,
+        asr: b.conversation_config?.asr,
+        turn: b.conversation_config?.turn,
+        conversation: b.conversation_config?.conversation,
+        ttsModel: b.conversation_config?.tts?.model_id,
+        openaiModel: env("OPENAI_MODEL"),
         overrides: b.platform_settings?.overrides,
         configured: true,
       });
@@ -121,18 +148,26 @@ Deno.serve(async (req) => {
               api_key: { secret_id: stored.secret_id },
             },
             backup_llm_config: { preference: "disabled" },
-            cascade_timeout_seconds: 10,
+            cascade_timeout_seconds: 15,
           },
         },
+        asr: { quality: "high", provider: "scribe_realtime" },
         tts: {
           voice_id: env("ELEVENLABS_REALTIME_VOICE_ID") ||
             env("ELEVENLABS_VOICE_ID"),
           model_id: "eleven_flash_v2",
         },
         turn: {
-          turn_timeout: 15,
+          turn_timeout: 8,
           silence_end_call_timeout: 120,
-          turn_eagerness: "patient",
+          turn_eagerness: "normal",
+          soft_timeout_config: {
+            timeout_seconds: 2.5,
+            message: "Hmm, let me think.",
+            use_llm_generated_message: false,
+            max_soft_timeouts_per_generation: 1,
+            disable_until_first_user_message: true,
+          },
         },
         conversation: {
           max_duration_seconds: 900,

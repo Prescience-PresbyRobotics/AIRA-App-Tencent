@@ -361,7 +361,7 @@
     if (window.airaRealtime) return window.airaRealtime.prepare();
     if (!realtimeModule) realtimeModule = new Promise((resolve, reject) => {
       const script = document.createElement('script');
-      script.src = new URL('realtime_client.js?v=20261016', base).href;
+      script.src = new URL('realtime_client.js?v=20261016b', base).href;
       script.onload = resolve;
       script.onerror = () => { realtimeModule = null; script.remove(); reject(new Error('Voice software could not load.')); };
       document.head.appendChild(script);
@@ -383,6 +383,9 @@
   }
   function stopRealtime() { ++realtimeEpoch; window.airaRealtime?.stop(); }
   function setMicMuted(value) { window.airaRealtime?.mute(value); }
+  function setSpeakerMuted(value) { window.airaRealtime?.speakerMute(value); }
+  async function refreshMicrophones() { await window.airaRealtime?.refreshMicrophones(); }
+  async function changeMicrophone(id) { await window.airaRealtime?.changeMicrophone(id); }
   function stopAll() {
     stopRealtime(); stopCamera(); cancelRecording(); stopPlayback();
   }
@@ -395,10 +398,13 @@
   window.addEventListener('pagehide', stopAll);
   window.addEventListener('offline', () => { stopAll(); state.suspended = true; state.error = 'The call was interrupted. Please reconnect and start again.'; });
   window.airaMedia = Object.freeze({
-    snapshot: () => JSON.stringify({...state, ...window.airaRealtime?.snapshot(),
-      playing: state.playing || (window.airaRealtime?.snapshot().realtimeStatus === 'connected' && window.airaRealtime?.snapshot().callMode === 'speaking'), recordingSeconds: state.recordingStartedAt == null
-      ? 0 : Math.min(45, Math.floor((Date.now() - state.recordingStartedAt) / 1000))}),
-    attachPreview, projectFace, startCamera, stopCamera, prepareRealtime, startRealtime, stopRealtime, setMicMuted,
+    snapshot: () => {
+      const realtime = window.airaRealtime?.snapshot();
+      return JSON.stringify({...state, ...realtime,
+        playing: state.playing || (realtime?.realtimeStatus === 'connected' && realtime?.callMode === 'speaking'),
+        recordingSeconds: state.recordingStartedAt == null ? 0 : Math.min(45, Math.floor((Date.now() - state.recordingStartedAt) / 1000))});
+    },
+    attachPreview, projectFace, startCamera, stopCamera, prepareRealtime, startRealtime, stopRealtime, setMicMuted, setSpeakerMuted, refreshMicrophones, changeMicrophone,
     setDetection, startRecording, finishRecording, cancelRecording, playAudio, stopPlayback, stopAll,
   });
 })();

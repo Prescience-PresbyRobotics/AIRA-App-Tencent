@@ -1,0 +1,115 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>AIRA synthetic WebRTC audio test</title>
+<style>body{font:18px system-ui;background:#faf8f0;color:#183e34;padding:36px}button{font:inherit;padding:16px;border-radius:12px}pre{white-space:pre-wrap}</style>
+<h1>AIRA — synthetic browser audio test</h1>
+<p>Uses generated speech and the app’s real ElevenLabs SDK. It never opens your physical microphone or camera. Keep this page visible until the test ends.</p>
+<button id="run">Run synthetic WebRTC call</button><button id="stop" disabled>Stop test</button>
+<pre id="status">Ready</pre>
+<script src="/media/vendor/elevenlabs-client-1.28.0.js"></script>
+<script src="/media/realtime_client.js"></script>
+<script>
+'use strict';
+const config = __AIRA_TEST_CONFIG__;
+const view = document.getElementById('status'), button = document.getElementById('run');
+let active = false, ending = false, context, source, destination, instance, interval, timeout;
+let recognized = false, reply = false, inputPeak = 0, replyOutputPeak = 0, captures = 0, started = 0;
+let playbackStarted = false, connectedAt = 0, quietSince = 0, replyAt = 0, startupReason = 'startup_failed';
+const normalize = text => String(text).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+const expected = config.expected.map(normalize);
+// The page's Permissions-Policy also disables real microphone/camera access.
+// Each SDK capture gets a fresh clone, matching its two-stream acquisition.
+navigator.mediaDevices.getUserMedia = async options => {
+  if (!active || !options.audio || options.video) throw new DOMException('Synthetic audio only', 'NotAllowedError');
+  captures++;
+  return destination.stream.clone();
+};
+const sdkBegin = ElevenLabsClient.Conversation.startSession.bind(ElevenLabsClient.Conversation);
+ElevenLabsClient.Conversation.startSession = async options => {
+  const onMessage = options.onMessage;
+  try {
+    instance = await sdkBegin({...options, onMessage: event => {
+      onMessage?.(event);
+      const text = normalize(event.message || '');
+      if (event.role === 'user' || event.source === 'user') {
+        recognized ||= playbackStarted && expected.every(word => (` ${text} `).includes(` ${word} `));
+      } else if (recognized && (event.role === 'agent' || event.source === 'ai')) {
+        const filler = /^(h+m+|um+|uh+|well|yeah|okay|ok|let me think|one moment|hmm let me think|just a moment)$/;
+        if (text.split(' ').length >= 4 && !filler.test(text)
+            && !text.includes('how would you like me to call you')) {
+          reply = true;
+          replyAt = Date.now();
+          replyOutputPeak = 0; // The greeting can never satisfy reply-audio verification.
+        }
+      }
+    }});
+    return instance;
+  } catch (error) {
+    if (/setConfiguration|configuration in an unsupported way/.test(String(error.message))) startupReason = 'rtc_configuration_unsupported';
+    throw error; // Raw SDK messages never enter the page, result or server logs.
+  }
+};
+async function finish(success, reason) {
+  if (ending) return;
+  ending = true; active = false;
+  clearInterval(interval); clearTimeout(timeout);
+  airaRealtime.stop();
+  try { source?.stop(); } catch (_) {}
+  destination?.stream.getTracks().forEach(track => track.stop());
+  try { await context?.close(); } catch (_) {}
+  const result = {success, reason, seconds: Math.round((Date.now() - started) / 100) / 10,
+    microphoneStreams: captures, recognized, reply, inputPeak, replyOutputPeak};
+  view.textContent = JSON.stringify(result, null, 2);
+  document.getElementById('stop').disabled = true;
+  try {
+    await fetch('/result', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Aira-Smoke': config.nonce}, body: JSON.stringify(result)});
+  } catch (_) { view.textContent += '\nThe local test server is unavailable; it will perform cleanup on timeout.'; }
+}
+document.getElementById('stop').onclick = () => finish(false, 'stopped');
+button.onclick = async () => {
+  button.disabled = true; document.getElementById('stop').disabled = false;
+  active = true; started = Date.now();
+  // Covers fetch/decode/SDK startup as well as a connected-but-unresponsive call.
+  timeout = setTimeout(() => finish(false, 'timeout'), 75000);
+  view.textContent = 'Connecting the official SDK with generated speech…';
+  try {
+    context = new AudioContext({sampleRate: 48000});
+    await context.resume();
+    if (!active) return;
+    destination = context.createMediaStreamDestination();
+    source = context.createBufferSource();
+    const audioResponse = await fetch('/speech.wav');
+    if (!audioResponse.ok) throw new Error('Synthetic audio unavailable');
+    source.buffer = await context.decodeAudioData(await audioResponse.arrayBuffer());
+    if (!active) return;
+    source.connect(destination);
+    const response = await fetch('/config', {headers: {'X-Aira-Smoke': config.nonce}});
+    if (!response.ok) throw new Error('Call unavailable');
+    const call = await response.json();
+    if (!active) return;
+    await airaRealtime.start(call);
+    if (!active) { airaRealtime.stop(); return; }
+    connectedAt = Date.now();
+    interval = setInterval(() => {
+      try {
+        const state = airaRealtime.snapshot();
+        const input = Number(instance.getInputVolume()) || 0;
+        const output = Number(instance.getOutputVolume()) || 0;
+        inputPeak = Math.max(inputPeak, input);
+        if (reply && Date.now() >= replyAt) replyOutputPeak = Math.max(replyOutputPeak, output);
+        const quiet = state.callMode !== 'speaking' && output < .01 && state.agentCaption;
+        quietSince = quiet ? quietSince || Date.now() : 0;
+        if (!playbackStarted && ((quietSince && Date.now() - quietSince >= 1000) || Date.now() - connectedAt > 12000)) {
+          playbackStarted = true;
+          source.start();
+        }
+        view.textContent = JSON.stringify({status: state.realtimeStatus, mode: state.callMode,
+          microphoneStreams: captures, generatedSpeechStarted: playbackStarted, recognized, reply,
+          inputPeak, replyOutputPeak}, null, 2);
+        if (recognized && reply && inputPeak > .01 && replyOutputPeak > .01) void finish(true, 'audio_recognized_and_answered');
+        else if (state.realtimeStatus === 'failed' || state.realtimeStatus === 'disconnected') void finish(false, 'disconnected');
+      } catch (_) { void finish(false, 'poll_failed'); }
+    }, 100);
+  } catch (_) { await finish(false, startupReason); }
+};
+</script>

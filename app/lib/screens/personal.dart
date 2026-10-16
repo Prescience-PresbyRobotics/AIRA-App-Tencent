@@ -348,7 +348,7 @@ class PersonalScreen extends StatelessWidget {
                 if (await confirmAction(
                   c,
                   'Forget this memory?',
-                  'AIRA will no longer use it. Linked follow-ups will be cancelled.',
+                  'AIRA will no longer use it or earlier chats for future replies. Linked follow-ups will be cancelled. Your chat history stays visible; you can clear it separately in Settings.',
                   confirm: 'Forget',
                 )) {
                   try {

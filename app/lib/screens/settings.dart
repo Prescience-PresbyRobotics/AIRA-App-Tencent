@@ -14,6 +14,16 @@ class SettingsScreen extends StatelessWidget {
   });
 
   Future<void> toggle(BuildContext c, String key, bool value) async {
+    if (key == 'store_conversations' && !value && controller.consent(key)) {
+      if (!await confirmAction(
+        c,
+        'Stop saving and delete chat history?',
+        'Saved chats and call transcripts will be deleted. Future conversations stay only while this app is open.',
+        confirm: 'Delete and turn off',
+      )) {
+        return;
+      }
+    }
     try {
       await controller.updatePreference(key, value);
     } catch (e) {
@@ -224,7 +234,7 @@ class SettingsScreen extends StatelessWidget {
               c,
               'store_conversations',
               'Save conversations',
-              'Keep your chat for this prototype’s 24-hour lifetime.',
+              'Keep chat and call transcripts across visits until you delete them. Turning this off deletes saved chats.',
             ),
             _toggle(
               c,
@@ -372,6 +382,12 @@ class SettingsScreen extends StatelessWidget {
             ),
             const AiraGap(height: 20),
             OutlinedButton.icon(
+              onPressed: () => _clearHistory(c),
+              icon: const Icon(Icons.forum_outlined),
+              label: const Text('Clear conversation history'),
+            ),
+            const AiraGap(height: 12),
+            OutlinedButton.icon(
               onPressed: () => _deleteData(c),
               icon: const Icon(Icons.delete_outline),
               label: const Text('Delete my data'),
@@ -389,6 +405,22 @@ class SettingsScreen extends StatelessWidget {
       const Notice('AIRA is not a medical or emergency service.'),
     ],
   };
+
+  Future<void> _clearHistory(BuildContext c) async {
+    if (await confirmAction(
+      c,
+      'Clear conversation history?',
+      'This deletes saved chats and call transcripts and ends any active call. Saved memories and reminders stay separate.',
+      confirm: 'Clear history',
+    )) {
+      try {
+        await controller.clearChatHistory();
+        if (c.mounted) showMessage(c, 'Your conversation history is cleared.');
+      } catch (e) {
+        if (c.mounted) showMessage(c, AiraController.cleanError(e));
+      }
+    }
+  }
 
   Future<void> _deleteData(BuildContext c) async {
     if (await confirmAction(

@@ -16,6 +16,8 @@ async function database() {
     const name of [
       "202610140001_aira_core.sql",
       "202610160001_realtime_calls.sql",
+      "202610160002_durable_history.sql",
+      "202610160003_pending_history.sql",
     ]
   ) {
     const migration = await Deno.readTextFile(
@@ -135,8 +137,15 @@ Deno.test({
       );
       await q("select aira_memory_edit($1,$2,1,null)", [A, memory.id]);
       assert(
-        (await q("select * from messages")).length === 0,
-        "Forgetting removes stale context",
+        (await q("select * from messages")).length === 2,
+        "Forgetting preserves the visible conversation archive",
+      );
+      assert(
+        (await q(
+          "select * from messages where context_version=(select consent_version from profiles where id=$1)",
+          [A],
+        )).length === 0,
+        "Forgetting excludes old archived turns from future model context",
       );
       assert(
         (await q("select consent_version from profiles where id=$1", [A]))[0]
@@ -493,6 +502,209 @@ Deno.test({
         [A, id],
       );
       await fails(() => message(A), "rate_limited");
+    } finally {
+      await db.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "Saved history is durable, paginated, owner-isolated and deletable",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const db = await database();
+    const q = async (sql: string, args: unknown[] = []) =>
+      (await db.query<any>(sql, args)).rows;
+    try {
+      await q("insert into auth.users(id) values($1),($2)", [A, B]);
+      await q(
+        `select aira_preferences($1,'{"consents":{"conversation_storage":true}}')`,
+        [A],
+      );
+      for (let i = 0; i < 3; i++) {
+        const r =
+          (await q(`select aira_reserve_message($1,$2,null,'text') value`, [
+            A,
+            crypto.randomUUID(),
+          ]))[0].value;
+        await q("select aira_finish_message($1,$2,$3,$4,2)", [
+          A,
+          r.request.id,
+          `User ${i}`,
+          `Aira ${i}`,
+        ]);
+      }
+      const rows = await q(
+        "select text,expires_at::text expiry from messages order by history_order",
+      );
+      assert(
+        rows.length === 6 && rows.every((r: any) => r.expiry === "infinity"),
+        "Opted-in transcripts have no timer expiry",
+      );
+      // Simulate age without altering the permanent retention decision.
+      await q(`update conversations set accepted_at=now()-interval '30 days'`);
+      await q(
+        `update message_requests set created_at=now()-interval '30 days'`,
+      );
+      await q(`update messages set created_at=now()-interval '30 days'`);
+      await q("select aira_worker_tick()");
+      assert(
+        (await q("select * from messages")).length === 6,
+        "Worker does not expire saved chats or cascade their parents",
+      );
+      const first =
+        (await q("select aira_chat_history($1,null,3) value", [A]))[0].value;
+      assert(
+        first.messages.map((m: any) => m.text).join("|") ===
+          "Aira 1|User 2|Aira 2",
+        "Newest page is returned in chronological order",
+      );
+      const second = (await q("select aira_chat_history($1,$2,3) value", [
+        A,
+        first.nextCursor,
+      ]))[0].value;
+      assert(
+        second.messages.map((m: any) => m.text).join("|") ===
+          "User 0|Aira 0|User 1",
+        "Exclusive cursor preserves equal-timestamp messages",
+      );
+      assert(second.nextCursor === null, "Last page has no cursor");
+      assert(
+        (await q("select aira_chat_history($1,null,3) value", [B]))[0].value
+          .messages.length === 0,
+        "Other owner never sees history",
+      );
+      await db.exec(
+        `set role authenticated;select set_config('request.jwt.claim.sub','${B}',false);`,
+      );
+      assert(
+        (await q("select * from messages")).length === 0,
+        "Direct RLS reads also isolate history",
+      );
+      await fails(
+        () => q("select aira_chat_history($1,null,3)", [A]),
+        "permission denied",
+      );
+      await db.exec("reset role;");
+      await q(
+        `select aira_preferences($1,'{"consents":{"conversation_storage":false}}')`,
+        [A],
+      );
+      assert(
+        (await q("select * from messages")).length === 0,
+        "Turning storage off removes saved content",
+      );
+      assert(
+        (await q("select * from conversations where expires_at='infinity'"))
+          .length === 0,
+        "Opt-out bounds metadata retention",
+      );
+      await q(
+        `select aira_preferences($1,'{"consents":{"conversation_storage":true}}')`,
+        [A],
+      );
+      assert(
+        (await q("select aira_chat_history($1,null,3) value", [A]))[0].value
+          .messages.length === 0,
+        "Re-enabling does not resurrect deleted history",
+      );
+      const r =
+        (await q(`select aira_reserve_message($1,$2,null,'text') value`, [
+          A,
+          crypto.randomUUID(),
+        ]))[0].value;
+      await q("select aira_finish_message($1,$2,$3,$4,4)", [
+        A,
+        r.request.id,
+        "After opt-in",
+        "Saved again",
+      ]);
+      const deleted =
+        (await q("select aira_clear_chat_history($1) version", [A]))[0];
+      assert(
+        deleted.version === 5 &&
+          (await q("select * from messages")).length === 0,
+        "Clear history deletes parents and invalidates old call/context tokens",
+      );
+      assert(
+        (await q("select consents from profiles where id=$1", [A]))[0].consents
+          .conversation_storage,
+        "Clear history preserves the future saving preference",
+      );
+    } finally {
+      await db.close();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "Delivered outgoing text survives reload before the checked reply finishes",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const db = await database();
+    const q = async (sql: string, args: unknown[] = []) =>
+      (await db.query<any>(sql, args)).rows;
+    try {
+      await q("insert into auth.users(id) values($1),($2)", [A, B]);
+      await q(
+        `select aira_preferences($1,'{"consents":{"conversation_storage":true}}')`,
+        [A],
+      );
+      const r =
+        (await q(`select aira_reserve_message($1,$2,null,'text') value`, [
+          A,
+          crypto.randomUUID(),
+        ]))[0].value;
+      await q("select aira_save_message_input($1,$2,$3,2)", [
+        A,
+        r.request.id,
+        "Delivered before reply",
+      ]);
+      const waiting =
+        (await q("select aira_chat_history($1,null,50) value", [A]))[0].value
+          .messages;
+      assert(
+        waiting.length === 1 && waiting[0].text === "Delivered before reply" &&
+          waiting[0].delivery === "delivered" &&
+          waiting[0].requestStatus === "processing",
+        "Reload shows the actual delivered user message before assistant output exists",
+      );
+      await q("select aira_save_message_input($1,$2,$3,2)", [
+        A,
+        r.request.id,
+        "Delivered before reply",
+      ]);
+      await q("select aira_finish_message($1,$2,$3,$4,2)", [
+        A,
+        r.request.id,
+        "Delivered before reply",
+        "Checked reply",
+      ]);
+      const completed =
+        (await q("select aira_chat_history($1,null,50) value", [A]))[0].value
+          .messages;
+      assert(
+        completed.length === 2 && completed[0].delivery === "read" &&
+          completed[1].text === "Checked reply",
+        "Completion adds one reply and marks the existing user turn read without duplicating it",
+      );
+      const unstored =
+        (await q(`select aira_reserve_message($1,$2,null,'text') value`, [
+          B,
+          crypto.randomUUID(),
+        ]))[0].value;
+      await q("select aira_save_message_input($1,$2,$3,1)", [
+        B,
+        unstored.request.id,
+        "No storage permission",
+      ]);
+      assert(
+        (await q("select * from messages where user_id=$1", [B])).length === 0,
+        "Outgoing persistence still requires storage consent",
+      );
     } finally {
       await db.close();
     }

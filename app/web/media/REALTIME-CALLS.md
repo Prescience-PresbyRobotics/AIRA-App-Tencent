@@ -23,13 +23,15 @@ and rerun the lifecycle and browser checks. Do not hand-edit the vendor bundle.
 
 ## Contract and privacy
 
-Opening the screen preloads local JavaScript only. The user's Start action requests
-an authenticated server session; `Conversation.startSession` receives:
+The user's voice/video call button starts an authenticated call; the browser asks
+for microphone permission if needed. Preview mode does not start a provider call.
+`Conversation.startSession` receives:
 
 ```js
 {
   conversationToken,
   connectionType: 'webrtc',
+  webRtc: { singlePeerConnection: false },
   customLlmExtraBody: { aira_session_token: signedPerCallToken },
   dynamicVariables: { aira_name: '...' },
   useWakeLock: false
@@ -45,7 +47,7 @@ The configured ElevenLabs agent has audio recording disabled and retention_days
 set to zero, requesting scheduled deletion of provider conversation history and
 audio after each call. This is not the provider's special zero-retention mode:
 that setting is incompatible with this custom-LLM configuration. Do not describe
-this as no provider logging or immediate deletion. The pre-Start disclosure names
+this as no provider logging or immediate deletion. The call details disclose
 ElevenLabs voice processing, OpenAI replies, and this scheduled deletion policy.
 
 The microphone is continuous while connected and unmuted. Mute immediately disables
@@ -63,33 +65,92 @@ while an earlier SDK connection is unresolved; this prevents old asynchronous wo
 from capturing for a new session. The original browser function is restored when
 cleanup settles. There is no automatic reconnect or background resume in AIRA.
 
-Camera and facial analysis require their own actions; analysis starts only after
+A video-call action opens the local camera after audio connects; voice calls can
+enable the camera explicitly. Facial analysis remains separate and starts only after
 `face_cues` consent is saved. A fresh single-face estimate can be sent through the
 protected call-context endpoint (label and timestamp only). Unknown, stale, no-face,
 multiple-face and disabled states clear that estimate. A correction is sent as
 `selfReportedFeeling`, separate from the model result; clearing the stated feeling
 sends null. Both are ephemeral context, not automatically recorded mood measurements.
 
+## Browser compatibility and microphone controls
+
+The published SDK embeds LiveKit 2.21.0, whose default single-peer connection join
+failed in the tested WebKit browser before it published microphone audio:
+`RTCPeerConnection.setConfiguration` rejected an unsupported configuration change.
+A before/after real-provider test reproduced the failure and then passed with
+`webRtc: { singlePeerConnection: false }`. This is the official SDK's supported
+compatibility option; the vendor bundle is unchanged. See the upstream
+[ElevenLabs fix](https://github.com/elevenlabs/packages/pull/963).
+
+The SDK requests a preliminary permission stream and a second WebRTC capture stream.
+It normally stops the first without emitting `ended`. The adapter checks only
+still-live tracks, displays their microphone name, and reports device loss or
+system muting. The input/output meters come from the SDK's actual audio analysers;
+silence is not treated as a failure or proof that the provider heard speech.
+The microphone chooser calls `changeInputDevice({inputDeviceId})`; additional
+sample-rate/format options are unsupported by the bundled SDK's WebRTC path.
+Speaker mute changes output volume and does not change the operating system's
+speaker/headphone routing. Device names are local UI state, never sent to AIRA.
+
 ## Verification and limits
 
-`realtime_lifecycle_test.cjs` runs the real adapter against a controlled SDK and
-microphone: explicit capture, exact WebRTC options, captions, mute/unmute, late
-permission after End, late connection cleanup, background cancellation and guard
-restoration. `media_lifecycle_test.cjs` covers local camera/analysis lifecycle and
-mirrored cover-crop box projection. The model smoke test executes actual bundled
-weights and checks normalized boxes and cleared frame buffers. These automated
-checks are not evidence of a real provider connection.
+`realtime_lifecycle_test.cjs` exercises the real adapter with controlled SDK/device
+fixtures: two-stream acquisition, dual-peer option, real level plumbing, captions,
+waiting for a reply, mute/speaker controls, lost/changed devices, denied permission,
+late permission after End, background cancellation and guard restoration.
+`media_lifecycle_test.cjs` covers local camera/analysis lifecycle and mirrored
+cover-crop box projection. These mock tests are separate from provider tests.
 
-`app/test/call_screen_test.dart` verifies UI acceptance, real connection timing,
-late tokens/connections, live captions, mute, background restart, analysis consent,
-and separate self-report/context clearing. Native iOS/Android Flutter media adapters
-remain unimplemented: use the browser build. Live provider transport, browser/device
-microphone/audio permissions and iPhone Safari/Android Chrome need deployment/device
-verification; report those separately from local mock tests.
+On 16 October 2026, a browser test used the exact bundled SDK and adapter, generated
+speech supplied as a synthetic MediaStream, a private agent token, and the deployed
+screened OpenAI bridge. Before the compatibility option, WebRTC failed at negotiation.
+After the option, both SDK audio streams opened, ElevenLabs recognized the expected
+garden/tomatoes speech, and AIRA returned a new spoken reply. Observed input and
+output levels were nonzero. This verifies real browser WebRTC transport and provider
+audio ingestion, not a physical microphone, acoustic echo, headset routing, phone
+behavior, or human conversational accuracy. Earlier WebSocket text-only testing did
+not exercise microphone ingestion and is not used as evidence for this result.
 
-Live verification on 16 October: the private agent settings were read back, a WebRTC
-connection token was issued, and a synthetic provider WebSocket conversation received
-a greeting plus a screened OpenAI reply with matching speech audio. End revoked
-the app session and the synthetic account was removed. Jessica is the user-confirmed
-live voice. These checks do not verify a physical browser microphone, WebRTC media
-transport or camera device. The UI and final Firebase assets were checked separately.
+Native iOS/Android Flutter media adapters remain unimplemented. Use the browser
+build. Physical devices, permission flows, realistic interruption/echo, call limits
+and actual provider deletion still need separate verification. Jessica remains the
+user-confirmed live voice.
+
+## Repeat the synthetic browser audio test
+
+The test page lives in `scripts/`, outside the hosted app assets. It never opens a
+physical microphone/camera; generated speech is injected into a MediaStream and
+flows through the same official SDK and AIRA adapter. It creates a marked synthetic
+account, mints a real call token, and deletes the account/call in `finally`. Normal
+provider charges apply. The local server binds only to `127.0.0.1`, checks Host/Origin,
+and protects its in-memory token endpoint with a per-run nonce. Keys, tokens and
+transcripts are not printed or saved. Only the caller-supplied synthetic WAV and a
+non-secret cleanup journal are files.
+
+Prepare a 1–30 second mono 16 kHz, 16-bit PCM WAV containing generated English speech.
+On macOS, for example:
+
+```sh
+say --file-format=WAVE --data-format=LEI16@16000 -o /tmp/aira-smoke.wav "I enjoyed my garden today. The tomatoes are growing nicely. What do you think?"
+python3 scripts/smoke_browser_audio.py --project-ref YOUR_PROJECT_REF
+python3 scripts/smoke_browser_audio.py --project-ref YOUR_PROJECT_REF --audio-file /tmp/aira-smoke.wav --expect garden tomatoes --run
+```
+
+Set `--supabase /path/to/supabase` if needed. Open the printed `http://127.0.0.1:8766/`
+URL, click **Run synthetic WebRTC call**, and keep the page visible. `--port` changes
+the localhost port; `--origin` chooses an already allowed AIRA origin for server-side
+API calls. `--timeout` bounds the server wait (default 180 seconds). The browser has
+its own 75-second timeout beginning before SDK startup. Success requires all expected
+transcript words, a subsequent non-filler agent reply, measured input audio, and
+measured output **after that reply**, so the opening greeting cannot pass the test.
+It reports only booleans/counts/levels and then stops media.
+
+Ctrl-C and SIGTERM follow cleanup. After SIGKILL/power loss, use the printed run UUID:
+
+```sh
+python3 scripts/smoke_browser_audio.py --project-ref YOUR_PROJECT_REF --cleanup-run RUN_UUID
+```
+
+Cleanup verifies the account's synthetic identity markers before deletion. The
+same cleanup UUID is compatible with `scripts/smoke_live.py --cleanup-run`.

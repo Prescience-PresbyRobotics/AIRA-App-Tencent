@@ -16,6 +16,9 @@ class AiraMediaController extends ChangeNotifier {
     UnsupportedError('Live calls are available in the browser version.'),
   );
   void setMicMuted(bool muted) {}
+  void setSpeakerMuted(bool muted) {}
+  Future<void> refreshMicrophones() async {}
+  Future<void> changeMicrophone(String deviceId) async {}
   Future<void> startCamera() async => notifyListeners();
   void stopCamera() {}
   void setDetection(bool enabled) => notifyListeners();

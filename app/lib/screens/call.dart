@@ -30,7 +30,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
   Future<void>? closingSession;
   bool active = false, starting = false, previewOpen = false;
   bool ended = false, paused = false, savingConsent = false, publishing = false;
-  bool captions = true, sessionClosed = true;
+  bool captions = true, sessionClosed = true, showOptions = false;
   int epoch = 0, consentEpoch = 0;
   DateTime? connectedAt, lastPublishedAt;
   String? lastPublishedLabel, correction, contextError;
@@ -46,8 +46,11 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
     media = widget.mediaController ?? AiraMediaController();
     media.addListener(mediaChanged);
     WidgetsBinding.instance.addObserver(this);
-    // Preload local SDK code only. Microphone capture begins after Start.
+    // The call button in chat is the user's explicit call initiation.
     unawaited(media.prepareRealtime().catchError((_) {}));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !widget.controller.preview) unawaited(start());
+    });
     ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || ended) return;
       if (active) {
@@ -124,7 +127,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
   }
 
   Future<void> start() async {
-    if (active || starting || ended) return;
+    if (active || starting || ended || savingConsent) return;
     if (widget.controller.preview) {
       setState(() {
         previewOpen = true;
@@ -162,6 +165,7 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
         caption = 'Talk naturally. You can interrupt AIRA by speaking.';
       });
       unawaited(publishContext(force: true));
+      if (widget.video) unawaited(camera());
     } catch (error) {
       if (!current(request)) return;
       starting = false;
@@ -187,6 +191,12 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
         unawaited(publishContext(force: true));
       } else {
         await media.startCamera();
+        if (current(request) &&
+            cameraAllowed &&
+            media.state.cameraOn &&
+            widget.controller.consent('face_cues')) {
+          media.setDetection(true);
+        }
         // The browser camera epoch disposes permission results after End.
       }
     } catch (_) {
@@ -201,22 +211,42 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
 
   Future<void> detection(bool enabled) async {
     final request = ++consentEpoch;
-    if (!enabled) {
-      media.setDetection(false);
-      unawaited(publishContext(force: true));
+    final reconnect = !widget.controller.preview && (active || starting);
+    if (!enabled) media.setDetection(false);
+    // A privacy change invalidates the signed call session. End its audio first,
+    // then obtain a fresh session after the new choice has been saved.
+    if (reconnect) {
+      ++epoch;
+      active = false;
+      starting = false;
+      connectedAt = null;
+      media.stopAll();
+      closingSession = closeSession();
     }
-    setState(() => savingConsent = true);
+    setState(() {
+      savingConsent = true;
+      caption = reconnect ? 'Saving your choice and reconnecting…' : caption;
+    });
     try {
+      await closingSession;
+      if (!mounted || ended || request != consentEpoch) return;
       if (!widget.controller.preview) {
         await widget.controller.updatePreference('face_cues', enabled);
       }
       if (!mounted || ended || request != consentEpoch) return;
-      if (enabled && cameraAllowed && media.state.cameraOn) {
+      setState(() => savingConsent = false);
+      if (reconnect) {
+        await start();
+      } else if (enabled && cameraAllowed && media.state.cameraOn) {
         media.setDetection(true);
       }
     } catch (_) {
       if (mounted && !ended && request == consentEpoch) {
         media.setDetection(false);
+        setState(
+          () => caption =
+              'Your choice could not be saved. You can try the call again.',
+        );
         showMessage(
           context,
           enabled
@@ -342,6 +372,307 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
     return '${(seconds ~/ 60).toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
   }
 
+  CompanionActivity get activity {
+    if (starting) return CompanionActivity.connecting;
+    if (!active) return CompanionActivity.idle;
+    if (media.state.callMode == 'speaking') return CompanionActivity.speaking;
+    if (media.state.awaitingReply) return CompanionActivity.thinking;
+    if (connectedAt != null &&
+        DateTime.now().difference(connectedAt!).inSeconds < 4) {
+      return CompanionActivity.greeting;
+    }
+    return CompanionActivity.listening;
+  }
+
+  CompanionExpression get expression {
+    // Character performance follows explicit self-report or AIRA's own words;
+    // camera estimates never decide what the user is feeling.
+    if (correction == 'Sad' || correction == 'Worried') {
+      return CompanionExpression.reassuring;
+    }
+    if (correction == 'Happy') return CompanionExpression.playful;
+    if (correction == 'Mixed') return CompanionExpression.thoughtful;
+    final words = (media.state.agentCaption ?? '').toLowerCase();
+    if (RegExp(
+      r"\b(sorry|sounds tough|rough day|take your time|here with you|that sounds hard)\b",
+    ).hasMatch(words)) {
+      return CompanionExpression.reassuring;
+    }
+    if (RegExp(
+      r"\b(haha|hehe|woohoo|yay|love that|great news|excited|that's brilliant)\b",
+    ).hasMatch(words)) {
+      return CompanionExpression.playful;
+    }
+    if (RegExp(r"\b(wonder|curious|hmm)\b").hasMatch(words)) {
+      return CompanionExpression.thoughtful;
+    }
+    return CompanionExpression.warm;
+  }
+
+  String get callStatus {
+    if (savingConsent) return 'Reconnecting with your privacy choice…';
+    if (starting) return 'Calling AIRA…';
+    if (paused) return 'Call ended';
+    if (widget.controller.preview) return 'Interface preview';
+    if (!active) return 'Ready to call';
+    if (media.state.microphoneIssue != null) return 'Check your microphone';
+    if (media.state.callMode == 'speaking') return 'AIRA is speaking';
+    if (media.state.awaitingReply) return 'AIRA is thinking…';
+    if (media.state.micMuted) return 'Your microphone is muted';
+    return 'AIRA is listening';
+  }
+
+  Future<void> microphoneOptions() async {
+    unawaited(media.refreshMicrophones());
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheet) => SafeArea(
+        child: ListenableBuilder(
+          listenable: media,
+          builder: (context, _) {
+            final devices = media.state.availableMicrophones;
+            final selected =
+                devices.any((d) => d.id == media.state.selectedMicrophoneId)
+                ? media.state.selectedMicrophoneId
+                : null;
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Microphone',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 12),
+                  if (devices.isEmpty)
+                    const Text(
+                      'Allow microphone access in your browser, then try again.',
+                    )
+                  else
+                    DropdownButtonFormField<String>(
+                      key: ValueKey(selected),
+                      initialValue: selected,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Audio input',
+                      ),
+                      items: [
+                        for (final device in devices)
+                          DropdownMenuItem(
+                            value: device.id,
+                            child: Text(
+                              device.label,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: media.state.changingMicrophone
+                          ? null
+                          : (value) async {
+                              if (value == null) return;
+                              try {
+                                await media.changeMicrophone(value);
+                              } catch (_) {
+                                if (sheet.mounted) {
+                                  showMessage(
+                                    sheet,
+                                    'That microphone could not be opened. Try another input.',
+                                  );
+                                }
+                              }
+                            },
+                    ),
+                  const SizedBox(height: 16),
+                  if (media.state.changingMicrophone)
+                    const LinearProgressIndicator()
+                  else
+                    Row(
+                      children: [
+                        _MicrophoneMeter(
+                          level: media.state.inputLevel,
+                          muted: media.state.micMuted,
+                          dark: false,
+                        ),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text('Say a few words. The bars should move.'),
+                        ),
+                      ],
+                    ),
+                  if (media.state.microphoneIssue != null) ...[
+                    const SizedBox(height: 12),
+                    Text(media.state.microphoneIssue!),
+                  ],
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Your browser or computer controls the speaker and headphone output.',
+                    style: TextStyle(fontSize: 14, color: AiraColors.muted),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget cameraPreview(bool narrow) => SizedBox(
+    width: narrow ? 112 : 170,
+    height: narrow ? 138 : 190,
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(22),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          const ColoredBox(color: Color(0xFF344E49)),
+          AiraCameraPreview(controller: media),
+          if (!media.state.cameraOn)
+            Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    media.state.cameraBusy
+                        ? Icons.videocam_outlined
+                        : Icons.videocam_off_outlined,
+                    color: Colors.white70,
+                    size: 30,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    media.state.cameraBusy ? 'Opening camera…' : 'Camera off',
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+          const Positioned(
+            left: 12,
+            bottom: 10,
+            child: Text(
+              'You',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+                shadows: [Shadow(blurRadius: 5)],
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget optionalSettings() => Container(
+    margin: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(22),
+    ),
+    child: Column(
+      children: [
+        if (widget.video) ...[
+          Material(
+            type: MaterialType.transparency,
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Show facial emotion'),
+              subtitle: Text(
+                savingConsent ? 'Saving your choice…' : 'Optional. Images stay here. Changing this reconnects the call.',
+              ),
+              value: media.state.detectionEnabled,
+              onChanged: cameraAllowed && media.state.cameraOn && !savingConsent
+                  ? detection
+                  : null,
+            ),
+          ),
+          if (media.state.detectionEnabled) ...[
+            Text(
+              media.state.emotionText,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const Text(
+              'An expression is an uncertain estimate, not necessarily how you feel.',
+              style: TextStyle(fontSize: 13, color: AiraColors.muted),
+            ),
+            TextButton(
+              onPressed: correct,
+              child: const Text('That’s not how I feel'),
+            ),
+          ],
+          if (correction != null)
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'You said: $correction · ${widget.controller.preview
+                        ? 'local preview'
+                        : correctionShared
+                        ? 'shared with AIRA'
+                        : 'sharing…'}',
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Clear my stated feeling',
+                  onPressed: () {
+                    setState(() {
+                      correction = null;
+                      correctionShared = false;
+                    });
+                    unawaited(publishContext(force: true));
+                  },
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+          const Divider(),
+        ],
+        const Text(
+          'ElevenLabs carries the live voice conversation; OpenAI creates AIRA’s replies. Voice recordings are off and provider call history is scheduled for deletion after the call. Camera images stay on this device.',
+          style: TextStyle(fontSize: 13, color: AiraColors.muted),
+        ),
+      ],
+    ),
+  );
+
+  Widget captionsPanel() => ConstrainedBox(
+    constraints: const BoxConstraints(maxHeight: 148, maxWidth: 560),
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (media.state.userCaption != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                'You: ${media.state.userCaption}',
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 15,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          if (media.state.agentCaption != null)
+            Text(
+              'AIRA: ${media.state.agentCaption}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 17,
+                height: 1.4,
+              ),
+            ),
+        ],
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: media,
@@ -355,352 +686,515 @@ class _CallState extends State<CallScreen> with WidgetsBindingObserver {
         }
       },
       child: Scaffold(
-        backgroundColor: AiraColors.lavender,
-        body: SafeArea(
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 900),
-              child: Column(
-                children: [
-                  AiraPadding(
-                    padding: const EdgeInsets.all(20),
-                    child: Row(
+        backgroundColor: const Color(0xFF102F29),
+        body: DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment(0, -.3),
+              radius: 1.1,
+              colors: [Color(0xFF315B50), Color(0xFF102F29)],
+            ),
+          ),
+          child: SafeArea(
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 900),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final narrow = constraints.maxWidth < 500;
+                    final stageHeight = (constraints.maxHeight - 370).clamp(
+                      230.0,
+                      490.0,
+                    );
+                    final mascotSize = (stageHeight * .88).clamp(
+                      210.0,
+                      narrow ? 310.0 : 420.0,
+                    );
+                    return Column(
                       children: [
-                        IconButton(
-                          tooltip: 'End and return to chat',
-                          onPressed: end,
-                          icon: const Icon(Icons.arrow_back_rounded),
-                        ),
-                        const AiraGap(width: 8),
-                        const Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                          child: Row(
                             children: [
-                              Text(
-                                'AIRA',
-                                style: TextStyle(
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.bold,
+                              IconButton(
+                                tooltip: 'End and return to chat',
+                                onPressed: end,
+                                icon: const Icon(
+                                  Icons.keyboard_arrow_down_rounded,
+                                  color: Colors.white,
+                                  size: 30,
                                 ),
                               ),
-                              Text(
-                                'AI companion · Live conversation',
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  color: AiraColors.muted,
+                              const Expanded(
+                                child: Center(
+                                  child: Text(
+                                    'AIRA',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 30,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: .3,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Call settings',
+                                onPressed: () =>
+                                    setState(() => showOptions = !showOptions),
+                                icon: Icon(
+                                  showOptions ? Icons.close : Icons.more_horiz,
+                                  color: Colors.white,
                                 ),
                               ),
                             ],
                           ),
                         ),
+                        Text(
+                          widget.video
+                              ? 'AI companion · Video call'
+                              : 'AI companion · Voice call',
+                          style: const TextStyle(
+                            color: Color(0xFFBCD0C8),
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 5),
                         if (active)
                           Text(
                             duration,
                             semanticsLabel: 'Active call elapsed $duration',
-                            style: const TextStyle(fontSize: 14),
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 14,
+                              fontFeatures: [FontFeature.tabularFigures()],
+                            ),
                           ),
-                      ],
-                    ),
-                  ),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      padding: AiraLayout.of(context)
-                          .insets(const EdgeInsets.symmetric(horizontal: 24)),
-                      child: Column(
-                        children: [
-                          if (widget.video)
-                            Align(
-                              alignment: Alignment.centerRight,
-                              child: SizedBox(
-                                width: 300,
-                                height: 225,
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(20),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            child: Column(
+                              children: [
+                                SizedBox(
+                                  width: double.infinity,
+                                  height: stageHeight,
                                   child: Stack(
-                                    fit: StackFit.expand,
+                                    alignment: Alignment.center,
                                     children: [
-                                      const ColoredBox(
-                                        color: Color(0xFF4F4C60),
-                                      ),
-                                      AiraCameraPreview(controller: media),
-                                      if (!media.state.cameraOn)
-                                        const Center(
-                                          child: Column(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Icon(
-                                                Icons.videocam_off_outlined,
-                                                color: Colors.white,
-                                                size: 32,
-                                              ),
-                                              SizedBox(height: 8),
-                                              Text(
-                                                'Camera off',
-                                                style: TextStyle(
-                                                  color: Colors.white,
-                                                  fontSize: 15,
+                                      Positioned.fill(
+                                        child: Center(
+                                          child: Container(
+                                            width: mascotSize * .96,
+                                            height: mascotSize * .96,
+                                            decoration: BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              color: const Color(0xFFECE6D9)
+                                                  .withValues(alpha: .97),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: Colors.black
+                                                      .withValues(alpha: .08),
+                                                  blurRadius: 30,
+                                                  offset: const Offset(0, 16),
                                                 ),
-                                              ),
-                                            ],
+                                              ],
+                                            ),
                                           ),
+                                        ),
+                                      ),
+                                      Padding(
+                                        padding: EdgeInsets.only(
+                                          top: widget.video && narrow ? 54 : 0,
+                                        ),
+                                        child: Companion(
+                                          size: mascotSize,
+                                          activity: activity,
+                                          expression: expression,
+                                          voiceLevel: media.state.outputLevel,
+                                        ),
+                                      ),
+                                      if (widget.video)
+                                        Positioned(
+                                          top: 12,
+                                          right: 16,
+                                          child: cameraPreview(narrow),
                                         ),
                                     ],
                                   ),
                                 ),
-                              ),
-                            ),
-                          Companion(
-                            size: widget.video
-                                ? 175
-                                : MediaQuery.sizeOf(context).width < 500
-                                ? 235
-                                : 290,
-                            speaking: media.state.playing,
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 9,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: .75),
-                              borderRadius: BorderRadius.circular(30),
-                            ),
-                            child: Text(
-                              starting
-                                  ? 'Connecting…'
-                                  : active
-                                  ? media.state.micMuted
-                                        ? 'Microphone muted'
-                                        : media.state.callMode == 'speaking'
-                                        ? 'AIRA is speaking · you can interrupt'
-                                        : 'Listening — speak naturally'
-                                  : 'Ready when you are',
-                              style: const TextStyle(fontSize: 16),
-                            ),
-                          ),
-                          const AiraGap(height: 16),
-                          AiraCard(
-                            child: Text(
-                              caption,
-                              textAlign: TextAlign.center,
-                              style: Theme.of(context).textTheme.titleLarge
-                                  ?.copyWith(height: 1.4),
-                            ),
-                          ),
-                          if (active) ...[
-                            SwitchListTile(
-                              title: const Text('Show captions'),
-                              value: captions,
-                              onChanged: (value) =>
-                                  setState(() => captions = value),
-                            ),
-                            if (captions && media.state.userCaption != null)
-                              AiraCard(
-                                child: Text('You: ${media.state.userCaption}'),
-                              ),
-                            if (captions && media.state.agentCaption != null)
-                              AiraCard(
-                                child: Text(
-                                  'AIRA: ${media.state.agentCaption}',
-                                ),
-                              ),
-                            const AiraGap(height: 12),
-                          ],
-                          if (widget.video) ...[
-                            const AiraGap(height: 16),
-                            AiraCard(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 8,
-                              ),
-                              child: Column(
-                                children: [
-                                  Material(
-                                    type: MaterialType.transparency,
-                                    child: SwitchListTile(
-                                      contentPadding: EdgeInsets.zero,
-                                      title: const Text(
-                                        'Show facial emotion',
-                                        style: TextStyle(fontSize: 18),
-                                      ),
-                                      subtitle: Text(
-                                        savingConsent
-                                            ? 'Saving your choice…'
-                                            : widget.controller.preview
-                                            ? 'Optional · processed on this device'
-                                            : 'Optional · frames stay here; a fresh estimate can help AIRA reply',
-                                        style: const TextStyle(fontSize: 14),
-                                      ),
-                                      value: media.state.detectionEnabled,
-                                      onChanged:
-                                          cameraAllowed &&
-                                              media.state.cameraOn &&
-                                              !savingConsent
-                                          ? detection
-                                          : null,
-                                    ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 20,
                                   ),
-                                  if (media.state.detectionEnabled) ...[
-                                    const Divider(),
-                                    Text(
-                                      media.state.emotionText,
-                                      style: const TextStyle(
-                                        fontSize: 18,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    const Text(
-                                      'A facial expression is an uncertain estimate, not how you necessarily feel.',
-                                      style: TextStyle(fontSize: 13),
-                                    ),
-                                    TextButton(
-                                      onPressed: correct,
-                                      child: const Text(
-                                        'That’s not how I feel',
-                                      ),
-                                    ),
-                                  ],
-                                  if (correction != null)
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          child: Text(
-                                            'You said: $correction · ${widget.controller.preview
-                                                ? 'local preview'
-                                                : correctionShared
-                                                ? 'shared with AIRA'
-                                                : 'sharing…'}',
-                                            style: const TextStyle(
-                                              fontSize: 17,
-                                              color: AiraColors.forest,
-                                            ),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      if (active &&
+                                          media.state.callMode != 'speaking' &&
+                                          !media.state.awaitingReply) ...[
+                                        _MicrophoneMeter(
+                                          level: media.state.inputLevel,
+                                          muted: media.state.micMuted,
+                                        ),
+                                        const SizedBox(width: 10),
+                                      ],
+                                      Flexible(
+                                        child: Text(
+                                          callStatus,
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 17,
+                                            fontWeight: FontWeight.w500,
                                           ),
                                         ),
-                                        IconButton(
-                                          tooltip: 'Clear my stated feeling',
-                                          onPressed: () {
-                                            setState(() {
-                                              correction = null;
-                                              correctionShared = false;
-                                            });
-                                            unawaited(
-                                              publishContext(force: true),
-                                            );
-                                          },
-                                          icon: const Icon(Icons.close),
-                                        ),
-                                      ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                if (active && captions) captionsPanel(),
+                                if (!active && !starting)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 28,
                                     ),
-                                ],
-                              ),
+                                    child: Text(
+                                      caption,
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 15,
+                                      ),
+                                    ),
+                                  ),
+                                if (starting)
+                                  const Padding(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 24,
+                                    ),
+                                    child: Text(
+                                      'Allow microphone access when your browser asks.',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ),
+                                if (media.state.microphoneIssue != null)
+                                  TextButton.icon(
+                                    onPressed: microphoneOptions,
+                                    icon: const Icon(
+                                      Icons.settings_voice,
+                                      color: Color(0xFFFFD4A4),
+                                    ),
+                                    label: const Text(
+                                      'Choose a microphone',
+                                      style: TextStyle(
+                                        color: Color(0xFFFFD4A4),
+                                      ),
+                                    ),
+                                  ),
+                                if (widget.video &&
+                                    media.state.detectionEnabled)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 20,
+                                      vertical: 8,
+                                    ),
+                                    child: Text(
+                                      media.state.emotionText,
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        color: Color(0xFFD4E7CB),
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ),
+                                if (showOptions) optionalSettings(),
+                                if (contextError != null)
+                                  Padding(
+                                    padding: const EdgeInsets.all(16),
+                                    child: Text(
+                                      contextError!,
+                                      style: const TextStyle(
+                                        color: Color(0xFFFFD4A4),
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                  ),
+                                if (media.state.error != null ||
+                                    media.state.realtimeError != null)
+                                  Padding(
+                                    padding: const EdgeInsets.all(16),
+                                    child: Text(
+                                      media.state.realtimeError ??
+                                          media.state.error!,
+                                      style: const TextStyle(
+                                        color: Color(0xFFFFD4A4),
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ),
+                                const SizedBox(height: 16),
+                              ],
                             ),
-                          ],
-                          const AiraGap(height: 16),
-                          if (media.state.error != null)
-                            Notice(media.state.error!),
-                          if (media.state.realtimeError != null)
-                            Notice(media.state.realtimeError!),
-                          if (contextError != null) Notice(contextError!),
-                          if (widget.controller.preview)
-                            const Notice(
-                              'Preview mode: camera and facial detection work locally. Sign in to a connected account for live voice calls.',
-                            ),
-                          if (!active && !widget.controller.preview)
-                            const Notice(
-                              'Start opens your microphone. ElevenLabs processes voice; OpenAI creates replies. ElevenLabs recordings are off, and its call history is scheduled for deletion after the call. Camera images stay on your device; camera starts only when you choose.',
-                            ),
-                          if (active)
-                            const Text(
-                              'AIRA may take a moment to check a reply before speaking.',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: AiraColors.muted,
-                              ),
-                            ),
-                          const AiraGap(height: 16),
-                        ],
-                      ),
-                    ),
-                  ),
-                  AiraPadding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      children: [
-                        Wrap(
-                          spacing: 12,
-                          runSpacing: 10,
-                          alignment: WrapAlignment.center,
-                          children: [
-                            if (!active && !previewOpen)
-                              FilledButton.icon(
-                                onPressed:
-                                    starting ||
-                                        (widget.controller.preview &&
-                                            !widget.video)
-                                    ? null
-                                    : start,
-                                icon: const Icon(Icons.call_outlined),
-                                label: Text(
-                                  starting
-                                      ? 'Connecting…'
-                                      : widget.controller.preview
-                                      ? widget.video
-                                            ? 'Open camera preview'
-                                            : 'Sign in for live calls'
-                                      : paused
-                                      ? 'Start again'
-                                      : widget.video
-                                      ? 'Start video call'
-                                      : 'Start voice call',
-                                ),
-                              ),
-                            if (active)
-                              FilledButton.icon(
-                                onPressed: () =>
-                                    media.setMicMuted(!media.state.micMuted),
-                                icon: Icon(
-                                  media.state.micMuted
-                                      ? Icons.mic_off_outlined
-                                      : Icons.mic_none_rounded,
-                                ),
-                                label: Text(
-                                  media.state.micMuted ? 'Unmute' : 'Mute',
-                                ),
-                              ),
-                            if (cameraAllowed && widget.video)
-                              OutlinedButton.icon(
-                                onPressed: camera,
-                                icon: Icon(
-                                  media.state.cameraOn
-                                      ? Icons.videocam_off_outlined
-                                      : Icons.videocam_outlined,
-                                ),
-                                label: Text(
-                                  media.state.cameraOn || media.state.cameraBusy
-                                      ? 'Camera off'
-                                      : 'Camera on',
-                                ),
-                              ),
-                          ],
-                        ),
-                        const AiraGap(height: 14),
-                        SizedBox(
-                          width: double.infinity,
-                          child: FilledButton.icon(
-                            style: FilledButton.styleFrom(
-                              backgroundColor: const Color(0xFFB94952),
-                            ),
-                            onPressed: end,
-                            icon: const Icon(Icons.call_end_rounded),
-                            label: const Text('End call'),
                           ),
                         ),
+                        if (!active &&
+                            !starting &&
+                            !previewOpen &&
+                            !savingConsent)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                              vertical: 8,
+                            ),
+                            child: FilledButton.icon(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFC9E9CD),
+                                foregroundColor: const Color(0xFF153A2D),
+                              ),
+                              onPressed:
+                                  widget.controller.preview && !widget.video
+                                  ? null
+                                  : start,
+                              icon: const Icon(Icons.call_rounded),
+                              label: Text(
+                                widget.controller.preview
+                                    ? widget.video
+                                          ? 'Open camera preview'
+                                          : 'Sign in for live calls'
+                                    : paused
+                                    ? 'Start again'
+                                    : 'Call again',
+                              ),
+                            ),
+                          ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
+                          child: Wrap(
+                            alignment: WrapAlignment.center,
+                            spacing: narrow ? 9 : 24,
+                            runSpacing: 12,
+                            children: [
+                              if (active) ...[
+                                _CallControl(
+                                  label: media.state.speakerMuted
+                                      ? 'Sound off'
+                                      : 'Sound on',
+                                  icon: media.state.speakerMuted
+                                      ? Icons.volume_off_rounded
+                                      : Icons.volume_up_rounded,
+                                  selected: !media.state.speakerMuted,
+                                  onPressed: () => media.setSpeakerMuted(
+                                    !media.state.speakerMuted,
+                                  ),
+                                ),
+                                _CallControl(
+                                  label: media.state.micMuted
+                                      ? 'Unmute'
+                                      : 'Mute',
+                                  icon: media.state.micMuted
+                                      ? Icons.mic_off_rounded
+                                      : Icons.mic_rounded,
+                                  selected: media.state.micMuted,
+                                  onPressed: () =>
+                                      media.setMicMuted(!media.state.micMuted),
+                                ),
+                              ],
+                              if (widget.video && cameraAllowed)
+                                _CallControl(
+                                  label:
+                                      media.state.cameraOn ||
+                                          media.state.cameraBusy
+                                      ? 'Camera off'
+                                      : 'Camera on',
+                                  icon: media.state.cameraOn
+                                      ? Icons.videocam_rounded
+                                      : Icons.videocam_off_rounded,
+                                  selected: media.state.cameraOn,
+                                  onPressed: camera,
+                                ),
+                              if (active && !widget.video)
+                                _CallControl(
+                                  label: 'Captions',
+                                  icon: captions
+                                      ? Icons.closed_caption_rounded
+                                      : Icons.closed_caption_off_rounded,
+                                  selected: captions,
+                                  onPressed: () =>
+                                      setState(() => captions = !captions),
+                                ),
+                              _CallControl(
+                                label: 'End call',
+                                icon: Icons.call_end_rounded,
+                                end: true,
+                                onPressed: end,
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (active)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: Wrap(
+                              alignment: WrapAlignment.center,
+                              children: [
+                                TextButton.icon(
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: const Color(0xFFBCD0C8),
+                                  ),
+                                  onPressed: microphoneOptions,
+                                  icon: const Icon(
+                                    Icons.tune_rounded,
+                                    size: 16,
+                                  ),
+                                  label: const Text(
+                                    'Microphone',
+                                    style: TextStyle(fontSize: 13),
+                                  ),
+                                ),
+                                if (widget.video)
+                                  TextButton.icon(
+                                    style: TextButton.styleFrom(
+                                      foregroundColor: const Color(0xFFBCD0C8),
+                                    ),
+                                    onPressed: () =>
+                                        setState(() => captions = !captions),
+                                    icon: const Icon(
+                                      Icons.closed_caption_outlined,
+                                      size: 16,
+                                    ),
+                                    label: Text(
+                                      captions
+                                          ? 'Hide captions'
+                                          : 'Show captions',
+                                      style: const TextStyle(fontSize: 13),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        if (widget.controller.preview)
+                          const Padding(
+                            padding: EdgeInsets.fromLTRB(24, 0, 24, 16),
+                            child: Text(
+                              'Preview only. Sign in for a live conversation.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
                       ],
-                    ),
-                  ),
-                ],
+                    );
+                  },
+                ),
               ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class _CallControl extends StatelessWidget {
+  const _CallControl({
+    required this.label,
+    required this.icon,
+    required this.onPressed,
+    this.selected = false,
+    this.end = false,
+  });
+  final String label;
+  final IconData icon;
+  final VoidCallback onPressed;
+  final bool selected, end;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 66,
+    child: Tooltip(
+      message: label,
+      child: TextButton(
+        style: TextButton.styleFrom(
+          padding: EdgeInsets.zero,
+          minimumSize: const Size(66, 86),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+        ),
+        onPressed: onPressed,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 58,
+              height: 58,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: end
+                    ? const Color(0xFFD7535F)
+                    : selected
+                    ? const Color(0xFFE7F0EB)
+                    : Colors.white.withValues(alpha: .14),
+              ),
+              child: Icon(
+                icon,
+                size: 26,
+                color: end || !selected
+                    ? Colors.white
+                    : const Color(0xFF163A30),
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _MicrophoneMeter extends StatelessWidget {
+  const _MicrophoneMeter({
+    required this.level,
+    required this.muted,
+    this.dark = true,
+  });
+  final double level;
+  final bool muted, dark;
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: muted ? 'Microphone muted' : 'Microphone input level',
+    value: muted ? '0 percent' : '${(level.clamp(0, 1) * 100).round()} percent',
+    child: SizedBox(
+      width: 34,
+      height: 22,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: List.generate(
+          5,
+          (i) => Container(
+            width: 4,
+            height: 6 + i * 3.0,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(3),
+              color: !muted && level > (i + 1) * .025
+                  ? dark
+                        ? const Color(0xFFBDE5BE)
+                        : AiraColors.forest
+                  : dark
+                  ? Colors.white24
+                  : AiraColors.line,
             ),
           ),
         ),

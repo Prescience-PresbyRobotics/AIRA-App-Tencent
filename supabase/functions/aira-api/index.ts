@@ -92,6 +92,7 @@ function capability(get: Env) {
     externalCaregiverDelivery: false,
     reminders: "foreground_only",
     retentionHours: 24,
+    conversationRetention: "until_deleted",
     language: "en",
   };
 }
@@ -252,7 +253,15 @@ export function createHandler(
             ? db.request(`loneliness_responses?${owned(subject)}`)
             : [],
           permitted.includes("conversations")
-            ? db.request(`conversations?${owned(subject)}&completed=eq.true`)
+            ? db.request(
+              `conversations?${
+                owned(subject)
+              }&completed=eq.true&accepted_at=gt.${
+                encodeURIComponent(
+                  new Date(Date.now() - 86400000).toISOString(),
+                )
+              }`,
+            )
             : [],
           permitted.includes("mood")
             ? db.request(
@@ -330,6 +339,33 @@ export function createHandler(
             "App access disabled and application content removed. Supabase Auth identity remains; administrator deletion is a separate action.",
         });
       }
+      if (path === "/v1/history" && method === "GET") {
+        const before = url.searchParams.get("before");
+        if (
+          before !== null &&
+          (!/^[1-9]\d{0,18}$/.test(before) ||
+            BigInt(before) > 9223372036854775807n)
+        ) {
+          throw new ApiError(
+            400,
+            "invalid_cursor",
+            "Please refresh your conversation history.",
+          );
+        }
+        return respond(
+          await db.rpc("aira_chat_history", {
+            p_user: user,
+            p_before: before,
+            p_limit: 50,
+          }),
+        );
+      }
+      if (path === "/v1/history" && method === "DELETE") {
+        const privacyVersion = await db.rpc("aira_clear_chat_history", {
+          p_user: user,
+        });
+        return respond({ deleted: true, privacyVersion });
+      }
       const messageStatus = path.match(/^\/v1\/messages\/([^/]+)\/status$/);
       if (messageStatus && method === "GET") {
         const request = await db.one(
@@ -388,6 +424,21 @@ export function createHandler(
             speechToken: null,
           }, r.status === "processing" ? 202 : 200);
         }
+        if (p.consents.conversation_storage) {
+          const saved = await db.rpc("aira_save_message_input", {
+            p_user: user,
+            p_request: r.id,
+            p_input: text,
+            p_consent_version: p.consent_version,
+          });
+          if (!saved) {
+            throw new ApiError(
+              409,
+              "preferences_changed",
+              "Your privacy choices changed. Please send your message again.",
+            );
+          }
+        }
         let answer = SAFE_FALLBACK;
         let status = "safe_fallback";
         let inputFlag: any = null;
@@ -406,7 +457,7 @@ export function createHandler(
               : [];
             if (p.consents.conversation_storage) {
               const history = await db.request(
-                `messages?user_id=eq.${user}&conversation_id=eq.${r.conversation_id}&expires_at=gt.${nowFilter()}&order=created_at.desc&limit=10`,
+                `messages?user_id=eq.${user}&conversation_id=eq.${r.conversation_id}&expires_at=gt.${nowFilter()}&context_version=eq.${p.consent_version}&request_id=neq.${r.id}&order=history_order.desc&limit=10`,
               );
               context = history.reverse().map((m: any) => ({
                 role: m.role,

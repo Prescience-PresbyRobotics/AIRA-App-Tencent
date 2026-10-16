@@ -21,6 +21,12 @@ class _ChatState extends State<ChatScreen> {
   final draft = TextEditingController(), scroll = ScrollController();
   final media = AiraMediaController();
   @override
+  void initState() {
+    super.initState();
+    scrollToLatest();
+  }
+
+  @override
   void dispose() {
     draft.dispose();
     scroll.dispose();
@@ -38,6 +44,30 @@ class _ChatState extends State<ChatScreen> {
         );
       }
     });
+  }
+
+  Future<void> olderHistory() async {
+    final offset = scroll.hasClients ? scroll.offset : 0.0;
+    final extent = scroll.hasClients ? scroll.position.maxScrollExtent : 0.0;
+    await widget.controller.refreshHistory(older: true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && scroll.hasClients) {
+        scroll.jumpTo(
+          (offset + scroll.position.maxScrollExtent - extent).clamp(
+            0.0,
+            scroll.position.maxScrollExtent,
+          ),
+        );
+      }
+    });
+  }
+
+  Future<void> enableHistory() async {
+    try {
+      await widget.controller.updatePreference('store_conversations', true);
+    } catch (e) {
+      if (mounted) showMessage(context, AiraController.cleanError(e));
+    }
   }
 
   Future<void> send() async {
@@ -117,6 +147,8 @@ class _ChatState extends State<ChatScreen> {
   Widget build(BuildContext c) {
     final ctl = widget.controller;
     final roomy = MediaQuery.sizeOf(c).width > 740;
+    final visible = ctl.visibleMessages;
+    final opening = ctl.showIntroduction;
     return LayoutBuilder(
       builder: (context, bounds) {
         final scrollAll =
@@ -208,19 +240,64 @@ class _ChatState extends State<ChatScreen> {
             EdgeInsets.symmetric(horizontal: roomy ? 56 : 20, vertical: 24),
           ),
           children: [
-            _dateDivider(ctl.introduction.time),
-            _bubble(ctl.introduction, opening: true),
-            for (final (index, message) in ctl.visibleMessages.indexed) ...[
-              if (!DateUtils.isSameDay(
-                message.time,
-                index == 0
-                    ? ctl.introduction.time
-                    : ctl.visibleMessages[index - 1].time,
-              ))
+            if (ctl.historyLoading)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(12),
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else if (ctl.hasOlderHistory)
+              Center(
+                child: TextButton.icon(
+                  onPressed: olderHistory,
+                  icon: const Icon(Icons.history_rounded),
+                  label: const Text('Load earlier messages'),
+                ),
+              ),
+            if (ctl.historyError.isNotEmpty) ...[
+              Notice('Could not restore saved chats. ${ctl.historyError}'),
+              TextButton(
+                onPressed: () => ctl.refreshHistory(),
+                child: const Text('Retry history'),
+              ),
+            ],
+            if (!ctl.preview && !ctl.consent('store_conversations'))
+              AiraPadding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: AiraCard(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    children: [
+                      const Text(
+                        'Chat saving is off. New conversations will disappear when you leave.',
+                      ),
+                      TextButton.icon(
+                        onPressed: enableHistory,
+                        icon: const Icon(Icons.cloud_done_outlined),
+                        label: const Text('Keep future conversations'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            if (opening) ...[
+              _dateDivider(ctl.introduction.time),
+              _bubble(ctl.introduction, opening: true),
+            ],
+            for (final (index, message) in visible.indexed) ...[
+              if ((index == 0 && !opening) ||
+                  !DateUtils.isSameDay(
+                    message.time,
+                    index == 0
+                        ? ctl.introduction.time
+                        : visible[index - 1].time,
+                  ))
                 _dateDivider(message.time),
               _bubble(message),
             ],
-            if (ctl.sending) const _TypingIndicator(),
+            if (ctl.sending || ctl.historyAwaitingReply)
+              const _TypingIndicator(),
             if (ctl.suggestedName != null && !ctl.sending)
               AiraPadding(
                 padding: const EdgeInsets.only(top: 4, bottom: 12),
@@ -330,7 +407,9 @@ class _ChatState extends State<ChatScreen> {
     final today = DateTime.now();
     final label = DateUtils.isSameDay(local, today)
         ? 'TODAY'
-        : DateFormat('EEE, d MMM').format(local).toUpperCase();
+        : DateFormat(
+            local.year == today.year ? 'EEE, d MMM' : 'EEE, d MMM yyyy',
+          ).format(local).toUpperCase();
     return AiraPadding(
       padding: const EdgeInsets.only(top: 4, bottom: 20),
       child: Row(
@@ -413,6 +492,15 @@ class _ChatState extends State<ChatScreen> {
                       crossAxisAlignment: WrapCrossAlignment.center,
                       alignment: WrapAlignment.end,
                       children: [
+                        if (m.mode != 'text')
+                          Icon(
+                            m.mode == 'video'
+                                ? Icons.videocam_outlined
+                                : Icons.call_outlined,
+                            size: 13,
+                            color: AiraColors.muted,
+                            semanticLabel: '${m.mode} call transcript',
+                          ),
                         Text(
                           time,
                           key: ValueKey('time-${m.id}'),

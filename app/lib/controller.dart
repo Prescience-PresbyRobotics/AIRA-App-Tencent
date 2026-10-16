@@ -25,6 +25,10 @@ class ChatTurn {
   final bool fromAira;
   final String? speechToken;
   final DateTime time;
+  final String mode;
+  final int? contextVersion;
+  final BigInt? historyOrder;
+  final String? requestStatus;
   MessageDelivery delivery;
   String? issue;
   ChatTurn({
@@ -32,6 +36,10 @@ class ChatTurn {
     required this.fromAira,
     String? id,
     this.speechToken,
+    this.mode = 'text',
+    this.contextVersion,
+    this.historyOrder,
+    this.requestStatus,
     DateTime? time,
     this.delivery = MessageDelivery.read,
   }) : id = id ?? requestUuid(),
@@ -70,7 +78,7 @@ class AiraController extends ChangeNotifier {
   int get sessionEpoch => _sessionEpoch;
   bool _disposed = false;
   bool _current(int epoch) => !_disposed && epoch == _sessionEpoch;
-  Timer? _deliveryPoll;
+  Timer? _deliveryPoll, _historyPoll;
   void cancelSend() {
     _deliveryPoll?.cancel();
     _deliveryPoll = null;
@@ -113,6 +121,19 @@ class AiraController extends ChangeNotifier {
   ChatTurn? _introduction;
   String? suggestedName;
   bool savingName = false;
+  bool historyLoading = false, historyLoaded = false;
+  String historyError = '';
+  String? historyCursor;
+  bool get hasOlderHistory => historyCursor != null;
+  bool get historyAwaitingReply => messages.any(
+    (turn) =>
+        !turn.fromAira &&
+        turn.requestStatus == 'processing' &&
+        DateTime.now().difference(turn.time) < const Duration(minutes: 2),
+  );
+  bool get showIntroduction =>
+      _introduction != null || (visibleMessages.isEmpty && !historyLoading);
+  int _historyGeneration = 0;
   ChatTurn get introduction => _introduction ??= ChatTurn(
     text: name.trim().isEmpty
         ? airaIntroduction
@@ -120,7 +141,15 @@ class AiraController extends ChangeNotifier {
     fromAira: true,
   );
   List<ChatTurn> get visibleMessages =>
-      [...messages, ...outbox]..sort((a, b) => a.time.compareTo(b.time));
+      [...messages, ...outbox]..sort(_chronological);
+  static int _chronological(ChatTurn a, ChatTurn b) {
+    final time = a.time.compareTo(b.time);
+    if (time != 0) return time;
+    return (a.historyOrder ?? BigInt.zero).compareTo(
+      b.historyOrder ?? BigInt.zero,
+    );
+  }
+
   bool get configured => client != null;
   bool get signedIn =>
       preview || (!_signingOut && client?.auth.currentSession != null);
@@ -128,12 +157,18 @@ class AiraController extends ChangeNotifier {
   AiraApi get api => AiraApi(client!);
   bool consent(String key) => preferences[key] == true;
   void _clear() {
+    _historyPoll?.cancel();
+    _historyPoll = null;
     _deliveryPoll?.cancel();
     _deliveryPoll = null;
     outbox.clear();
     _introduction = null;
     suggestedName = null;
     savingName = false;
+    historyLoading = historyLoaded = false;
+    historyCursor = null;
+    historyError = '';
+    _historyGeneration++;
     _sessionEpoch++;
     revision++;
     sending = false;
@@ -186,7 +221,7 @@ class AiraController extends ChangeNotifier {
       capabilities = Map<String, dynamic>.from(data['capabilities'] ?? {});
       onboarded =
           profile['onboarded'] == true || preferences['onboarded'] == true;
-      await refreshPersonal();
+      await Future.wait([refreshPersonal(), refreshHistory()]);
     } catch (e) {
       if (!_current(epoch)) return;
       error = 'Could not load your account. ${cleanError(e)}';
@@ -296,12 +331,124 @@ class AiraController extends ChangeNotifier {
         lonelyDays = null;
       }
     }
-    messages.clear();
-    outbox.clear();
+    if (key == 'store_conversations' && !value) {
+      _clearHistory();
+    }
     suggestedName = null;
-    conversationId = activeCallId;
     pendingRequest = null;
     pendingText = null;
+    notifyListeners();
+    if (key == 'store_conversations' && value) await refreshHistory();
+  }
+
+  void _clearHistory() {
+    _historyPoll?.cancel();
+    _historyPoll = null;
+    _historyGeneration++;
+    historyLoading = historyLoaded = false;
+    historyCursor = null;
+    historyError = '';
+    messages.clear();
+    outbox.clear();
+    _introduction = null;
+    conversationId = '';
+  }
+
+  Future<void> refreshHistory({bool older = false}) async {
+    if (preview || !consent('store_conversations') || historyLoading) return;
+    if (older && historyCursor == null) return;
+    final session = sessionEpoch;
+    final version = privacyVersion;
+    final generation = _historyGeneration;
+    final before = older ? historyCursor : null;
+    historyLoading = true;
+    historyError = '';
+    notifyListeners();
+    try {
+      final result = await api.request(
+        'GET',
+        '/history${before == null ? '' : '?before=${Uri.encodeQueryComponent(before)}'}',
+      );
+      if (!_current(session) ||
+          version != privacyVersion ||
+          generation != _historyGeneration) {
+        return;
+      }
+      if (result['privacyVersion'] != null &&
+          result['privacyVersion'] != privacyVersion) {
+        throw const AiraException(
+          'Your privacy choices changed. Refresh your account to reload history.',
+        );
+      }
+      final restored = _items(result, 'messages').map(
+        (item) => ChatTurn(
+          id: item['id'].toString(),
+          text: item['text'].toString(),
+          fromAira: item['role'] == 'assistant',
+          time: DateTime.parse(item['createdAt'].toString()).toLocal(),
+          mode: item['mode']?.toString() ?? 'text',
+          contextVersion: item['contextVersion'] as int?,
+          historyOrder: BigInt.tryParse(item['order']?.toString() ?? ''),
+          requestStatus: item['requestStatus']?.toString(),
+          delivery: item['delivery'] == 'delivered'
+              ? MessageDelivery.delivered
+              : MessageDelivery.read,
+        ),
+      );
+      final merged = <String, ChatTurn>{
+        for (final turn in messages) turn.id: turn,
+      };
+      for (final turn in restored) {
+        final existing = merged[turn.id];
+        // Keep fresh playback tokens in memory, and never downgrade a reply
+        // already received while an older history snapshot was in flight.
+        if (existing == null ||
+            (existing.speechToken == null &&
+                !(existing.delivery == MessageDelivery.read &&
+                    turn.delivery == MessageDelivery.delivered))) {
+          merged[turn.id] = turn;
+        }
+        outbox.removeWhere((pending) => pending.id == turn.id);
+      }
+      messages = merged.values.toList()..sort(_chronological);
+      if (older || !historyLoaded) {
+        historyCursor = result['nextCursor']?.toString();
+      }
+      if (!older && result['conversationId'] != null) {
+        conversationId = result['conversationId'].toString();
+      }
+      historyLoaded = true;
+    } catch (e) {
+      if (_current(session) && generation == _historyGeneration) {
+        historyError = cleanError(e);
+      }
+    } finally {
+      if (_current(session) && generation == _historyGeneration) {
+        historyLoading = false;
+        _historyPoll?.cancel();
+        _historyPoll = null;
+        if (historyAwaitingReply && consent('store_conversations')) {
+          _historyPoll = Timer(
+            const Duration(seconds: 2),
+            () => refreshHistory(),
+          );
+        }
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> clearChatHistory() async {
+    cancelSend();
+    final session = sessionEpoch;
+    if (!preview) {
+      final result = await api.request('DELETE', '/history');
+      if (!_current(session)) return;
+      privacyVersion = result['privacyVersion'] as int? ?? privacyVersion;
+    }
+    _clearHistory();
+    activeCallId = '';
+    pendingRequest = pendingText = null;
     notifyListeners();
   }
 
@@ -446,6 +593,8 @@ class AiraController extends ChangeNotifier {
           fromAira: false,
           id: id,
           delivery: MessageDelivery.sending,
+          contextVersion: privacyVersion,
+          mode: mode,
         );
     if (prior == null) outbox.add(outgoing);
     if (outgoing.delivery != MessageDelivery.delivered) {
@@ -453,7 +602,13 @@ class AiraController extends ChangeNotifier {
     }
     outgoing.issue = null;
     final firstReply = mode == 'text' && name.isEmpty && messages.isEmpty;
-    final history = [...messages];
+    final history = messages
+        .where(
+          (turn) =>
+              turn.contextVersion == null ||
+              turn.contextVersion == privacyVersion,
+        )
+        .toList();
     final opening = _introduction;
     if (mode == 'text' && opening != null && history.isEmpty) {
       history.add(opening);
@@ -470,7 +625,10 @@ class AiraController extends ChangeNotifier {
         'clientMessageId': id,
         'text': content,
         'mode': mode,
-        if (conversationId.isNotEmpty) 'conversationId': conversationId,
+        if (mode != 'text' && activeCallId.isNotEmpty)
+          'conversationId': activeCallId
+        else if (conversationId.isNotEmpty)
+          'conversationId': conversationId,
         'context': context,
         'contextVersion': privacyVersion,
         'introductionShown': mode == 'text' && opening != null,
@@ -491,16 +649,24 @@ class AiraController extends ChangeNotifier {
         );
       }
       privacyVersion = result['privacyVersion'] as int? ?? privacyVersion;
-      conversationId = result['conversationId']?.toString() ?? conversationId;
+      if (mode == 'text') {
+        conversationId = result['conversationId']?.toString() ?? conversationId;
+      }
       final reply = ChatTurn(
         text: result['text'].toString(),
         fromAira: true,
         id: result['messageId']?.toString(),
         speechToken: result['speechToken']?.toString(),
+        contextVersion: privacyVersion,
+        mode: mode,
       );
       outgoing.delivery = MessageDelivery.read;
       outgoing.issue = null;
       outbox.removeWhere((turn) => turn.id == id);
+      // A pending-history refresh may already have restored this delivered turn.
+      messages.removeWhere(
+        (turn) => turn.id == outgoing.id || turn.id == reply.id,
+      );
       messages.add(outgoing);
       messages.add(reply);
       if (firstReply) suggestedName = _nameFromFirstReply(content);
@@ -563,10 +729,8 @@ class AiraController extends ChangeNotifier {
       privacyVersion = result['privacyVersion'] as int? ?? privacyVersion;
     }
     memories.removeWhere((e) => e['id'] == memory['id']);
-    messages.clear();
-    outbox.clear();
     suggestedName = null;
-    conversationId = '';
+    pendingRequest = pendingText = null;
     notifyListeners();
   }
 
@@ -714,11 +878,8 @@ class AiraController extends ChangeNotifier {
       );
     }
     cancelSend();
-    messages.clear();
-    outbox.clear();
     pendingRequest = null;
     pendingText = null;
-    conversationId = '';
     final turnRevision = revision;
     final session = sessionEpoch;
     final service = api;
@@ -739,7 +900,6 @@ class AiraController extends ChangeNotifier {
         'Aira could not connect this call. Please try again.',
       );
     }
-    conversationId = id;
     activeCallId = id;
     notifyListeners();
     return result;
@@ -759,11 +919,8 @@ class AiraController extends ChangeNotifier {
 
   Future<void> beginCall(String mode) async {
     cancelSend();
-    messages.clear();
-    outbox.clear();
     pendingRequest = null;
     pendingText = null;
-    conversationId = '';
     final epoch = revision;
     final session = sessionEpoch;
     if (!preview) {
@@ -778,7 +935,6 @@ class AiraController extends ChangeNotifier {
         }
         return;
       }
-      conversationId = id;
       activeCallId = id;
     }
     notifyListeners();
@@ -788,9 +944,6 @@ class AiraController extends ChangeNotifier {
     cancelSend();
     final id = activeCallId;
     activeCallId = '';
-    conversationId = '';
-    messages.clear();
-    outbox.clear();
     pendingText = null;
     pendingRequest = null;
     if (!preview && id.isNotEmpty) {
@@ -799,7 +952,9 @@ class AiraController extends ChangeNotifier {
       } catch (_) {
         /* Local capture must still end if the backend is unavailable. */
       }
+      await refreshHistory();
     }
+    notifyListeners();
   }
 
   Future<void> pollEvents() async {
@@ -831,8 +986,6 @@ class AiraController extends ChangeNotifier {
     if (!_current(epoch)) return;
     if (action == 'accept') {
       cancelSend();
-      messages.clear();
-      outbox.clear();
       conversationId = result['event']?['conversation_id']?.toString() ?? '';
       tab = 0;
     }
@@ -878,6 +1031,8 @@ class AiraController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _historyPoll?.cancel();
+    _historyPoll = null;
     _deliveryPoll?.cancel();
     _deliveryPoll = null;
     _disposed = true;

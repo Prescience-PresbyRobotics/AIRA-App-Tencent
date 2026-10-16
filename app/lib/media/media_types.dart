@@ -6,6 +6,17 @@ class RecordedAudio {
   final String mimeType;
 }
 
+class AudioInputDevice {
+  const AudioInputDevice({required this.id, required this.label});
+  final String id, label;
+
+  factory AudioInputDevice.fromJson(Map<String, dynamic> json) =>
+      AudioInputDevice(
+        id: json['id'] as String,
+        label: json['label'] as String,
+      );
+}
+
 /// Facial estimates and user-reported feelings deliberately have separate data.
 /// This state contains only local model output, never a self-reported correction.
 class AiraMediaState {
@@ -26,6 +37,15 @@ class AiraMediaState {
     this.realtimeStatus = 'idle',
     this.callMode = 'listening',
     this.micMuted = false,
+    this.speakerMuted = false,
+    this.inputLevel = 0,
+    this.outputLevel = 0,
+    this.awaitingReply = false,
+    this.microphoneIssue,
+    this.microphoneName,
+    this.selectedMicrophoneId,
+    this.availableMicrophones = const [],
+    this.changingMicrophone = false,
     this.userCaption,
     this.agentCaption,
     this.realtimeError,
@@ -33,7 +53,10 @@ class AiraMediaState {
   });
   final String camera, microphone, detection;
   final String realtimeStatus, callMode;
-  final bool micMuted;
+  final bool micMuted, speakerMuted, awaitingReply, changingMicrophone;
+  final double inputLevel, outputLevel;
+  final String? microphoneIssue, microphoneName, selectedMicrophoneId;
+  final List<AudioInputDevice> availableMicrophones;
   final String? userCaption, agentCaption, realtimeError;
   final DateTime? realtimeConnectedAt;
   bool get connected => realtimeStatus == 'connected';
@@ -57,6 +80,18 @@ class AiraMediaState {
     realtimeStatus: json['realtimeStatus'] as String? ?? 'idle',
     callMode: json['callMode'] as String? ?? 'listening',
     micMuted: json['micMuted'] == true,
+    speakerMuted: json['speakerMuted'] == true,
+    inputLevel: (json['inputLevel'] as num?)?.toDouble() ?? 0,
+    outputLevel: (json['outputLevel'] as num?)?.toDouble() ?? 0,
+    awaitingReply: json['awaitingReply'] == true,
+    microphoneIssue: json['microphoneIssue'] as String?,
+    microphoneName: json['microphoneName'] as String?,
+    selectedMicrophoneId: json['selectedMicrophoneId'] as String?,
+    changingMicrophone: json['changingMicrophone'] == true,
+    availableMicrophones: (json['availableMicrophones'] as List? ?? [])
+        .whereType<Map<String, dynamic>>()
+        .map(AudioInputDevice.fromJson)
+        .toList(),
     userCaption: json['userCaption'] as String?,
     agentCaption: json['agentCaption'] as String?,
     realtimeError: json['realtimeError'] as String?,
